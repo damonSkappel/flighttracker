@@ -1,13 +1,14 @@
 package com.damonskappel.flighttracker;
 
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
 
-@RestController
-public class HealthController {
+@SpringBootApplication
+public class FlighttrackerApplication {
 
-    @GetMapping("/health")
-    public String health() {
-        return "ok";
+    public static void main(String[] args) {
+        SpringApplication.run(FlighttrackerApplication.class, args);
+
     }
+
 }

@@ -1,13 +1,13 @@
 package com.damonskappel.flighttracker.dto;
 
-public class StatsReponse {
+public class StatsResponse {
 
     private long totalAircraft;
     private long totalSnapshots;
     private String oldestSnapshot;
     private String newestSnapshot;
 
-    public StatsReponse(long totalAircraft, long totalSnapshots, String oldestSnapshot, String newestSnapshot) {
+    public StatsResponse(long totalAircraft, long totalSnapshots, String oldestSnapshot, String newestSnapshot) {
 
         this.totalAircraft = totalAircraft;
         this.totalSnapshots = totalSnapshots;
