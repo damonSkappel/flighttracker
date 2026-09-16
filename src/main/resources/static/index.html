@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flight Tracker</title>
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 20px;
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+            z-index: 1000;
+        }
+
+        #header h1 {
+            font-size: 1.2rem;
+            font-weight: 600;
+            letter-spacing: 1px;
+            color: #4fc3f7;
+        }
+
+        #stats-bar {
+            display: flex;
+            gap: 24px;
+            font-size: 0.85rem;
+            color: #aaa;
+        }
+
+        #stats-bar span {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        #stats-bar .value {
+            color: #4fc3f7;
+            font-weight: 600;
+        }
+
+        #status {
+            font-size: 0.8rem;
+            padding: 4px 10px;
+            border-radius: 12px;
+            background: #0f3460;
+            color: #4fc3f7;
+        }
+
+        #status.error {
+            background: #3d0000;
+            color: #ff6b6b;
+        }
+
+        #map {
+            flex: 1;
+        }
+
+        .leaflet-popup-content-wrapper {
+            background: #16213e;
+            color: #eee;
+            border: 1px solid #0f3460;
+            border-radius: 8px;
+        }
+
+        .leaflet-popup-tip {
+            background: #16213e;
+        }
+
+        .popup-content {
+            min-width: 180px;
+        }
+
+        .popup-callsign {
+            font-size: 1rem;
+            font-weight: 700;
+            color: #4fc3f7;
+            margin-bottom: 8px;
+            border-bottom: 1px solid #0f3460;
+            padding-bottom: 6px;
+        }
+
+        .popup-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.82rem;
+            margin: 4px 0;
+            color: #ccc;
+        }
+
+        .popup-row .label {
+            color: #888;
+        }
+
+        .popup-row .val {
+            color: #eee;
+            font-weight: 500;
+        }
+        .leaflet-tile {
+            filter: invert(100%) hue-rotate(180deg) brightness(85%) contrast(90%) saturate(60%);
+        }
+    </style>
+</head>
+<body>
+
+<div id="header">
+    <h1>✈ FLIGHT TRACKER</h1>
+    <div id="stats-bar">
+        <span>Aircraft: <span class="value" id="aircraft-count">—</span></span>
+        <span>Last update: <span class="value" id="last-update">—</span></span>
+    </div>
+    <div id="status">Connecting...</div>
+</div>
+
+<div id="map"></div>
+
+<!-- Leaflet JS -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+
+<script>
+    // ─── Map Setup ─────────────────────────────────────────────────────────────
+
+    const map = L.map('map', {
+        center: [39.5, -98.35],
+        zoom: 5,
+        zoomControl: true
+    });
+
+    // Dark-themed map tiles from CartoDB
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 19
+    }).addTo(map);
+
+    // LayerGroup to hold all aircraft markers
+    const flightLayer = L.layerGroup().addTo(map);
+
+    // ─── Aircraft Icon ──────────────────────────────────────────────────────────
+
+    function createAircraftIcon(heading, onGround) {
+        const color = onGround ? '#888888' : '#4fc3f7';
+        const size = onGround ? 13 : 16;
+        return L.divIcon({
+            html: `<div style="
+                font-size: ${size}px;
+                color: ${color};
+                transform: rotate(${heading || 0}deg);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 20px;
+                height: 20px;
+            ">✈</div>`,
+            className: '',
+            iconSize: [20, 20],
+            iconAnchor: [10, 10]
+        });
+    }
+
+    // ─── Popup Content ──────────────────────────────────────────────────────────
+
+    function buildPopup(flight) {
+        const callsign = flight.callsign || flight.icao24 || 'Unknown';
+        const altitude = flight.altitudeFeet != null
+            ? Math.round(flight.altitudeFeet).toLocaleString() + ' ft'
+            : '—';
+        const speed = flight.velocityKnots != null
+            ? Math.round(flight.velocityKnots) + ' kts'
+            : '—';
+        const heading = flight.heading != null
+            ? Math.round(flight.heading) + '°'
+            : '—';
+        const vertRate = flight.verticalRate != null
+            ? (flight.verticalRate > 0 ? '▲ ' : '▼ ')
+            + Math.abs(Math.round(flight.verticalRate)) + ' m/s'
+            : '—';
+        const status = flight.onGround ? '🟡 On Ground' : '🔵 Airborne';
+
+        return `
+            <div class="popup-content">
+                <div class="popup-callsign">${callsign}</div>
+                <div class="popup-row">
+                    <span class="label">ICAO24</span>
+                    <span class="val">${flight.icao24}</span>
+                </div>
+                <div class="popup-row">
+                    <span class="label">Country</span>
+                    <span class="val">${flight.originCountry || '—'}</span>
+                </div>
+                <div class="popup-row">
+                    <span class="label">Status</span>
+                    <span class="val">${status}</span>
+                </div>
+                <div class="popup-row">
+                    <span class="label">Altitude</span>
+                    <span class="val">${altitude}</span>
+                </div>
+                <div class="popup-row">
+                    <span class="label">Speed</span>
+                    <span class="val">${speed}</span>
+                </div>
+                <div class="popup-row">
+                    <span class="label">Heading</span>
+                    <span class="val">${heading}</span>
+                </div>
+                <div class="popup-row">
+                    <span class="label">Vert. Rate</span>
+                    <span class="val">${vertRate}</span>
+                </div>
+            </div>
+        `;
+    }
+
+    // ─── Fetch and Render ───────────────────────────────────────────────────────
+
+    async function updateFlights() {
+        const statusEl = document.getElementById('status');
+        const countEl = document.getElementById('aircraft-count');
+        const updateEl = document.getElementById('last-update');
+
+        try {
+            const response = await fetch('/flights');
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const flights = await response.json();
+
+            // Clear existing markers
+            flightLayer.clearLayers();
+
+            let plotted = 0;
+
+            flights.forEach(flight => {
+                // Skip aircraft with no position data
+                if (flight.latitude == null || flight.longitude == null) return;
+
+                const marker = L.marker(
+                    [flight.latitude, flight.longitude],
+                    { icon: createAircraftIcon(flight.heading, flight.onGround) }
+                );
+
+                marker.bindPopup(buildPopup(flight), {
+                    maxWidth: 220,
+                    className: 'flight-popup'
+                });
+
+                flightLayer.addLayer(marker);
+                plotted++;
+            });
+
+            // Update header stats
+            countEl.textContent = plotted.toLocaleString();
+            updateEl.textContent = new Date().toLocaleTimeString();
+
+            statusEl.textContent = 'Live';
+            statusEl.className = '';
+
+        } catch (error) {
+            console.error('Failed to fetch flights:', error);
+            statusEl.textContent = 'Error — retrying';
+            statusEl.className = 'error';
+        }
+    }
+
+    // ─── Start ──────────────────────────────────────────────────────────────────
+
+    updateFlights();
+    setInterval(updateFlights, 15000);
+
+</script>
+</body>
+</html>
