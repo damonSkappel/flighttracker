@@ -1,13 +1,18 @@
 package com.damonskappel.flighttracker.scheduler;
 
 import com.damonskappel.flighttracker.dto.OpenSkyStateVector;
+import com.damonskappel.flighttracker.repository.PositionSnapshotRepository;
 import com.damonskappel.flighttracker.service.FlightIngestionService;
 import com.damonskappel.flighttracker.service.OpenSkyClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.scheduling.annotation.Scheduled;
+import com.damonskappel.flighttracker.repository.PositionSnapshotRepository;
+import java.time.temporal.ChronoUnit;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 
 @Component
@@ -17,11 +22,13 @@ public class FlightPollingScheduler {
 
     private final OpenSkyClient openSkyClient;
     private final FlightIngestionService flightIngestionService;
+    private final PositionSnapshotRepository snapshotRepository;
 
-    public FlightPollingScheduler(OpenSkyClient openSkyClient, FlightIngestionService flightIngestionService) {
+    public FlightPollingScheduler(OpenSkyClient openSkyClient, FlightIngestionService flightIngestionService, PositionSnapshotRepository snapshotRepository) {
 
         this.openSkyClient = openSkyClient;
         this.flightIngestionService = flightIngestionService;
+        this.snapshotRepository = snapshotRepository;
     }
 
     @Scheduled(fixedDelay = 15000, initialDelay = 5000)
@@ -37,4 +44,13 @@ public class FlightPollingScheduler {
 
         flightIngestionService.ingest(states);
     }
+
+    @Scheduled(fixedDelay = 3600000, initialDelay = 60000)
+    public void cleanupOldSnapshots(){
+        log.info("Running snapshot cleanup");
+        snapshotRepository.deleteSnapshotsOlderThan(
+                Instant.now().minus(24, ChronoUnit.HOURS)
+        );
+    }
+
 }

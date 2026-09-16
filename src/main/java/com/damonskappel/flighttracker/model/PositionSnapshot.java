@@ -2,9 +2,12 @@ package com.damonskappel.flighttracker.model;
 
 import jakarta.persistence.*;
 import java.time.Instant;
+import jakarta.persistence.Index;
 
 @Entity
-@Table(name = "position_snapshots")
+@Table(name = "position_snapshots",
+indexes = @Index(name = "idx_snapshot_timestamp", columnList = "timestamp"))
+
 public class PositionSnapshot {
 
     @Id

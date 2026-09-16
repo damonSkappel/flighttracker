@@ -2,9 +2,11 @@ package com.damonskappel.flighttracker.repository;
 
 import com.damonskappel.flighttracker.model.PositionSnapshot;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
@@ -27,4 +29,9 @@ public interface PositionSnapshotRepository extends JpaRepository<PositionSnapsh
 
     @Query("SELECT MAX(p.timestamp) FROM PositionSnapshot p")
     Optional<Instant> findNewestTimestamp();
+
+    @Modifying
+    @Transactional
+    @Query("DELETE FROM PositionSnapshot p WHERE p.timestamp < :cutoff")
+    void deleteSnapshotsOlderThan(@Param("cutoff") Instant cutoff);
 }
