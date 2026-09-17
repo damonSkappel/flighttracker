@@ -5,7 +5,7 @@ on:
     branches: [ main ]
 
 env:
-  IMAGE_NAME: ghcr.io/damonSkappel/flighttracker
+  IMAGE_NAME: ghcr.io/damonskappel/flighttracker
 
 permissions:
   contents: read
