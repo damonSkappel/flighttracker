@@ -7,6 +7,8 @@
 
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css"/>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.css"/>
 
     <style>
         * {
@@ -136,6 +138,7 @@
 
 <!-- Leaflet JS -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
 
 <script>
     // ─── Map Setup ─────────────────────────────────────────────────────────────
@@ -153,8 +156,37 @@
     }).addTo(map);
 
     // LayerGroup to hold all aircraft markers
-    const flightLayer = L.layerGroup().addTo(map);
-
+    const flightLayer = L.markerClusterGroup({
+        maxClusterRadius: 40,
+        disableClusteringAtZoom: 7,
+        spiderfyOnMaxZoom: true,
+        showCoverageOnHover: false,
+        zoomToBoundsOnClick: true,
+        iconCreateFunction: function(cluster) {
+            const count = cluster.getChildCount();
+            let size = 'small';
+            if (count > 100) size = 'medium';
+            if (count > 500) size = 'large';
+            return L.divIcon({
+                html: `<div style="
+                background: rgba(79, 195, 247, 0.8);
+                border: 2px solid #4fc3f7;
+                border-radius: 50%;
+                color: #0a0a1a;
+                font-weight: 700;
+                font-size: 12px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 100%;
+                height: 100%;
+            ">${count}</div>`,
+                className: 'custom-cluster',
+                iconSize: count > 500 ? [50, 50] : count > 100 ? [40, 40] : [30, 30],
+                iconAnchor: count > 500 ? [25, 25] : count > 100 ? [20, 20] : [15, 15]
+            });
+        }
+    }).addTo(map);
     // ─── Aircraft Icon ──────────────────────────────────────────────────────────
 
     function createAircraftIcon(heading, onGround) {
