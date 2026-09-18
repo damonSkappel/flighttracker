@@ -1,0 +1,17 @@
+{
+  "connectionString": "",
+  "sampling": {
+    "percentage": 0
+  },
+  "instrumentation": {
+    "logging": {
+      "enabled": false
+    },
+    "jdbc": {
+      "enabled": false
+    },
+    "springScheduling": {
+      "enabled": false
+    }
+  }
+}
