@@ -35,15 +35,9 @@ public interface PositionSnapshotRepository extends JpaRepository<PositionSnapsh
     @Query("DELETE FROM PositionSnapshot p WHERE p.timestamp < :cutoff")
     void deleteSnapshotsOlderThan(@Param("cutoff") Instant cutoff);
 
-    @Query(value = """
-    SELECT DISTINCT ON (p.icao24)
-        p.id, p.icao24, p.timestamp, p.latitude, p.longitude,
-        p.baro_altitude, p.velocity, p.heading, p.vertical_rate, p.on_ground
-    FROM position_snapshots p
-    WHERE p.timestamp > :cutoff
-        AND p.latitude IS NOT NULL
-        AND p.longitude IS NOT NULL
-    ORDER BY p.icao24, p.timestamp DESC
-    """, nativeQuery = true)
+    @Query("SELECT p FROM PositionSnapshot p WHERE p.timestamp > :cutoff " +
+            "AND p.latitude IS NOT NULL AND p.longitude IS NOT NULL " +
+            "AND p.timestamp = (SELECT MAX(p2.timestamp) FROM PositionSnapshot p2 " +
+            "WHERE p2.aircraft = p.aircraft)")
     List<PositionSnapshot> findLatestSnapshotPerAircraft(@Param("cutoff") Instant cutoff);
 }
