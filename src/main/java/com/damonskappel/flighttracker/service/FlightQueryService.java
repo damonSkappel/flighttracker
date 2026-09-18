@@ -38,15 +38,12 @@ public class FlightQueryService {
     @Transactional(readOnly = true)
     public List<FlightResponse> getActiveFlights() {
         Instant cutoff = Instant.now().minus(5, ChronoUnit.MINUTES);
-        List<Aircraft> active = aircraftRepository.findByLastSeenAfter(cutoff);
 
-        return active.stream()
-                .map(aircraft -> {
-                    List<PositionSnapshot> history =
-                            snapshotRepository.findHistoryByIcao24(aircraft.getIcao24());
-                    PositionSnapshot latest = history.isEmpty() ? null : history.get(0);
-                    return toFlightResponse(aircraft, latest);
-                })
+        List<PositionSnapshot> latestSnapshots =
+                snapshotRepository.findLatestSnapshotPerAircraft(cutoff);
+
+        return latestSnapshots.stream()
+                .map(snapshot -> toFlightResponse(snapshot.getAircraft(), snapshot))
                 .collect(Collectors.toList());
     }
 
