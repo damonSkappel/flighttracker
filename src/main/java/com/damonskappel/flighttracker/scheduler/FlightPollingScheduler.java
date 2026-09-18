@@ -31,7 +31,7 @@ public class FlightPollingScheduler {
         this.snapshotRepository = snapshotRepository;
     }
 
-    @Scheduled(fixedDelay = 15000, initialDelay = 5000)
+    @Scheduled(fixedDelay = 60000, initialDelay = 5000)
     public void poll() {
         log.info("Starting OpenSky poll cycle");
 
