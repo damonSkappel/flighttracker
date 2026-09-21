@@ -4,6 +4,11 @@ public class FlightResponse {
 
     private String icao24;
     private String callsign;
+    /**
+     * US tail number derived from icao24. Null for non-US aircraft: only the US
+     * block encodes the registration in the address.
+     */
+    private String registration;
     private String originCountry;
     private Double latitude;
     private Double longitude;
@@ -25,13 +30,15 @@ public class FlightResponse {
     /** When our ingest job last saw this airframe (ISO-8601 UTC). */
     private String lastSeen;
 
-    public FlightResponse(String icao24, String callsign, String originCountry,
+    public FlightResponse(String icao24, String callsign, String registration,
+                          String originCountry,
                           Double latitude, Double longitude, Double altitudeFeet,
                           Double velocityKnots, Double velocityMps, Double heading,
                           Double verticalRate, Boolean onGround,
                           Long timePosition, Long lastContact, String lastSeen) {
         this.icao24 = icao24;
         this.callsign = callsign;
+        this.registration = registration;
         this.originCountry = originCountry;
         this.latitude = latitude;
         this.longitude = longitude;
@@ -48,6 +55,7 @@ public class FlightResponse {
 
     public String getIcao24() { return icao24; }
     public String getCallsign() { return callsign; }
+    public String getRegistration() { return registration; }
     public String getOriginCountry() { return originCountry; }
     public Double getLatitude() { return latitude; }
     public Double getLongitude() { return longitude; }

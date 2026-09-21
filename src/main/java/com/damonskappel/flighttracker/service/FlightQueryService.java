@@ -7,6 +7,7 @@ import com.damonskappel.flighttracker.model.Aircraft;
 import com.damonskappel.flighttracker.model.PositionSnapshot;
 import com.damonskappel.flighttracker.repository.AircraftRepository;
 import com.damonskappel.flighttracker.repository.PositionSnapshotRepository;
+import com.damonskappel.flighttracker.util.UsTailNumber;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
@@ -142,6 +143,7 @@ public class FlightQueryService {
         return new FlightResponse(
                 aircraft.getIcao24(),
                 aircraft.getCallsign(),
+                UsTailNumber.fromIcao24(aircraft.getIcao24()),
                 aircraft.getOriginCountry(),
                 snapshot != null ? snapshot.getLatitude() : null,
                 snapshot != null ? snapshot.getLongitude() : null,

@@ -7,8 +7,6 @@
 
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.css"/>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/MarkerCluster.Default.css"/>
 
     <style>
         * {
@@ -150,7 +148,6 @@
 
 <!-- Leaflet JS -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.markercluster/1.5.3/leaflet.markercluster.min.js"></script>
 
 <script>
     // ─── Map Setup ─────────────────────────────────────────────────────────────
@@ -161,44 +158,85 @@
         zoomControl: true
     });
 
-    // Dark-themed map tiles from CartoDB
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         maxZoom: 19
     }).addTo(map);
 
-    // LayerGroup to hold all aircraft markers
-    const flightLayer = L.markerClusterGroup({
-        maxClusterRadius: 40,
-        disableClusteringAtZoom: 7,
-        spiderfyOnMaxZoom: true,
-        showCoverageOnHover: false,
-        zoomToBoundsOnClick: true,
-        iconCreateFunction: function(cluster) {
-            const count = cluster.getChildCount();
-            let size = 'small';
-            if (count > 100) size = 'medium';
-            if (count > 500) size = 'large';
-            return L.divIcon({
-                html: `<div style="
-                background: rgba(79, 195, 247, 0.8);
-                border: 2px solid #4fc3f7;
-                border-radius: 50%;
-                color: #0a0a1a;
-                font-weight: 700;
-                font-size: 12px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                width: 100%;
-                height: 100%;
-            ">${count}</div>`,
-                className: 'custom-cluster',
-                iconSize: count > 500 ? [50, 50] : count > 100 ? [40, 40] : [30, 30],
-                iconAnchor: count > 500 ? [25, 25] : count > 100 ? [20, 20] : [15, 15]
-            });
+    // Every aircraft is drawn individually; there is no clustering. What keeps
+    // that affordable is viewport culling in renderTracks -- only tracks near
+    // the screen are attached to the map, so the DOM holds the couple of hundred
+    // markers you can actually see rather than every aircraft in the country.
+    const flightLayer = L.layerGroup().addTo(map);
+
+    // Fraction of the viewport kept attached beyond the visible edges, so a small
+    // pan does not pop markers in at the border.
+    const VIEWPORT_PAD = 0.25;
+
+    // ─── Geo helpers ───────────────────────────────────────────────────────────
+    // Pure functions: no map or DOM state. These are what position extrapolation
+    // will be built from.
+
+    const EARTH_RADIUS_M = 6371008.8;
+    const KNOTS_TO_MPS = 0.514444;
+
+    function toRad(deg) { return deg * Math.PI / 180; }
+    function toDeg(rad) { return rad * 180 / Math.PI; }
+
+    /**
+     * Great-circle destination point. A flat lat/lon offset visibly drifts at
+     * altitude and at high latitude, so project properly even over short hops.
+     * Returns the input position unchanged when there is nothing to project.
+     */
+    function projectPosition(lat, lon, headingDeg, speedMps, elapsedSeconds) {
+        if (speedMps == null || headingDeg == null || !(elapsedSeconds > 0)) {
+            return [lat, lon];
         }
-    }).addTo(map);
+        const delta = (speedMps * elapsedSeconds) / EARTH_RADIUS_M;
+        const theta = toRad(headingDeg);
+        const phi1 = toRad(lat);
+        const lambda1 = toRad(lon);
+
+        const sinPhi2 = Math.sin(phi1) * Math.cos(delta)
+            + Math.cos(phi1) * Math.sin(delta) * Math.cos(theta);
+        const phi2 = Math.asin(Math.max(-1, Math.min(1, sinPhi2)));
+        const lambda2 = lambda1 + Math.atan2(
+            Math.sin(theta) * Math.sin(delta) * Math.cos(phi1),
+            Math.cos(delta) - Math.sin(phi1) * sinPhi2
+        );
+        // Keep longitude in [-180, 180) across the antimeridian.
+        return [toDeg(phi2), ((toDeg(lambda2) + 540) % 360) - 180];
+    }
+
+    /**
+     * Rewrites `to` as the nearest equivalent angle to `from`, so interpolating
+     * 350deg -> 10deg travels 20deg forward rather than 340deg backward.
+     */
+    function unwrapHeading(from, to) {
+        return from + (((to - from + 540) % 360) - 180);
+    }
+
+    function normalizeHeading(deg) { return ((deg % 360) + 360) % 360; }
+
+    /**
+     * Epoch seconds of the aircraft's own position report. This -- not the row's
+     * ingest timestamp -- is the epoch to measure elapsed time from. Falls back
+     * to ingest time only when OpenSky sent no position time.
+     */
+    function fixEpochSeconds(flight) {
+        if (flight.timePosition != null) return flight.timePosition;
+        if (flight.lastSeen) {
+            const parsed = Date.parse(flight.lastSeen);
+            if (!Number.isNaN(parsed)) return parsed / 1000;
+        }
+        return null;
+    }
+
+    function fixAgeSeconds(fixEpoch, nowMs) {
+        if (fixEpoch == null) return null;
+        return ((nowMs == null ? Date.now() : nowMs) / 1000) - fixEpoch;
+    }
+
     // ─── Aircraft Icon ──────────────────────────────────────────────────────────
 
     // Nose points to 12 o'clock at rotation 0, so the CSS rotation is the
@@ -226,6 +264,20 @@
             iconSize: [size, size],
             iconAnchor: [size / 2, size / 2]
         });
+    }
+
+    /**
+     * Rotates an existing marker by touching the SVG transform directly.
+     * Rebuilding the icon would reparse HTML for every aircraft on every frame.
+     * Returns false when the marker has no rendered element yet.
+     */
+    function applyRotation(entry, heading) {
+        const el = entry.marker.getElement();
+        if (!el) return false;
+        const svg = el.querySelector('.plane-icon');
+        if (!svg) return false;
+        svg.style.transform = `rotate(${heading}deg)`;
+        return true;
     }
 
     // ─── Popup Content ──────────────────────────────────────────────────────────
@@ -260,6 +312,10 @@
             + Math.abs(Math.round(flight.verticalRate)) + ' m/s'
             : '—';
         const status = flight.onGround ? '🟡 On Ground' : '🔵 Airborne';
+        const age = fixAgeSeconds(fixEpochSeconds(flight));
+        const ageText = age == null ? '—'
+            : age < 60 ? Math.round(age) + 's ago'
+            : Math.round(age / 60) + 'm ago';
 
         return `
             <div class="popup-content">
@@ -267,6 +323,10 @@
                 <div class="popup-row">
                     <span class="label">ICAO24</span>
                     <span class="val">${esc(flight.icao24)}</span>
+                </div>
+                <div class="popup-row">
+                    <span class="label">Tail #</span>
+                    <span class="val">${esc(flight.registration) || '—'}</span>
                 </div>
                 <div class="popup-row">
                     <span class="label">Country</span>
@@ -292,9 +352,139 @@
                     <span class="label">Vert. Rate</span>
                     <span class="val">${vertRate}</span>
                 </div>
+                <div class="popup-row">
+                    <span class="label">Position fix</span>
+                    <span class="val">${ageText}</span>
+                </div>
             </div>
         `;
     }
+
+    // ─── Track Registry ─────────────────────────────────────────────────────────
+
+    /**
+     * icao24 -> {
+     *   marker,   L.Marker, reused across polls so it can be moved rather than
+     *             rebuilt -- this persistence is what animation requires
+     *   fix,      last known truth from the server: position, course, speed and
+     *             the epoch that position was reported at
+     *   drawn,    what is currently on screen, so renderTracks can skip no-ops
+     *   attached  whether the marker is currently seated in a layer
+     * }
+     */
+    const tracks = new Map();
+
+    function toFix(flight) {
+        return {
+            lat: flight.latitude,
+            lon: flight.longitude,
+            heading: flight.heading,
+            // Prefer the raw m/s the API now sends; fall back to un-converting.
+            speedMps: flight.velocityMps != null
+                ? flight.velocityMps
+                : (flight.velocityKnots != null ? flight.velocityKnots * KNOTS_TO_MPS : null),
+            epochSeconds: fixEpochSeconds(flight),
+            onGround: !!flight.onGround
+        };
+    }
+
+    function upsertTrack(flight) {
+        const fix = toFix(flight);
+        let entry = tracks.get(flight.icao24);
+
+        if (!entry) {
+            const marker = L.marker([fix.lat, fix.lon], {
+                icon: createAircraftIcon(fix.heading, fix.onGround)
+            });
+            marker.bindPopup(buildPopup(flight), {
+                maxWidth: 220,
+                className: 'flight-popup'
+            });
+            entry = {
+                marker,
+                fix,
+                // The marker is constructed at this position with an icon built
+                // from this course, so `drawn` starts out matching -- otherwise
+                // the first render redundantly re-sets both.
+                drawn: {
+                    lat: fix.lat, lon: fix.lon,
+                    heading: fix.heading, onGround: fix.onGround
+                },
+                attached: false
+            };
+            tracks.set(flight.icao24, entry);
+        } else {
+            entry.fix = fix;
+            // setPopupContent rather than rebind: rebinding closes a popup the
+            // user currently has open.
+            if (entry.marker.getPopup()) {
+                entry.marker.setPopupContent(buildPopup(flight));
+            }
+        }
+
+        return entry;
+    }
+
+    function pruneTracks(seen) {
+        for (const [icao24, entry] of tracks) {
+            if (seen.has(icao24)) continue;
+            if (entry.attached) flightLayer.removeLayer(entry.marker);
+            tracks.delete(icao24);
+        }
+    }
+
+    /**
+     * Draws every track at its current position. This is the single hook point
+     * for dead reckoning: today it renders the raw fix, and extrapolation means
+     * projecting `fix` forward by its age here before drawing.
+     */
+    function renderTracks() {
+        const bounds = map.getBounds().pad(VIEWPORT_PAD);
+
+        for (const entry of tracks.values()) {
+            const fix = entry.fix;
+            const drawn = entry.drawn;
+
+            if (fix.lat !== drawn.lat || fix.lon !== drawn.lon) {
+                entry.marker.setLatLng([fix.lat, fix.lon]);
+                drawn.lat = fix.lat;
+                drawn.lon = fix.lon;
+            }
+
+            const visible = bounds.contains(entry.marker.getLatLng());
+
+            if (visible && !entry.attached) {
+                // Re-attaching rebuilds the DOM element from options.icon, which
+                // would otherwise resurrect the rotation baked in at creation
+                // time, so hand it a correctly oriented icon on the way in.
+                entry.marker.setIcon(createAircraftIcon(fix.heading, fix.onGround));
+                drawn.heading = fix.heading;
+                drawn.onGround = fix.onGround;
+                flightLayer.addLayer(entry.marker);
+                entry.attached = true;
+            } else if (!visible && entry.attached) {
+                flightLayer.removeLayer(entry.marker);
+                entry.attached = false;
+            }
+
+            if (!entry.attached) continue;
+
+            // A change of ground state changes the icon's colour and size, so it
+            // has to be rebuilt; a plain course change only moves the transform.
+            if (fix.onGround !== drawn.onGround) {
+                entry.marker.setIcon(createAircraftIcon(fix.heading, fix.onGround));
+                drawn.onGround = fix.onGround;
+                drawn.heading = fix.heading;
+            } else if (fix.heading != null && fix.heading !== drawn.heading) {
+                if (applyRotation(entry, normalizeHeading(fix.heading))) {
+                    drawn.heading = fix.heading;
+                }
+            }
+        }
+    }
+
+    // Panning or zooming changes which tracks are near the screen.
+    map.on('moveend', renderTracks);
 
     // ─── Fetch and Render ───────────────────────────────────────────────────────
 
@@ -312,31 +502,17 @@
 
             const flights = await response.json();
 
-            // Clear existing markers
-            flightLayer.clearLayers();
-
-            let plotted = 0;
-
+            const seen = new Set();
             flights.forEach(flight => {
                 // Skip aircraft with no position data
                 if (flight.latitude == null || flight.longitude == null) return;
-
-                const marker = L.marker(
-                    [flight.latitude, flight.longitude],
-                    { icon: createAircraftIcon(flight.heading, flight.onGround) }
-                );
-
-                marker.bindPopup(buildPopup(flight), {
-                    maxWidth: 220,
-                    className: 'flight-popup'
-                });
-
-                flightLayer.addLayer(marker);
-                plotted++;
+                upsertTrack(flight);
+                seen.add(flight.icao24);
             });
+            pruneTracks(seen);
+            renderTracks();
 
-            // Update header stats
-            countEl.textContent = plotted.toLocaleString();
+            countEl.textContent = seen.size.toLocaleString();
             updateEl.textContent = new Date().toLocaleTimeString();
 
             statusEl.textContent = 'Live';

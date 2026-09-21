@@ -61,6 +61,7 @@ static/index.html  (Leaflet + markercluster, all inline)
 | `config/AppConfig.java` | `RestTemplate` bean (5s connect / 10s read) + `@EnableScheduling`. |
 | `config/WebConfig.java` | CORS for `/flights/**` and `/stats`. |
 | `dto/` | `OpenSkyStateVector` (ingest), `FlightResponse` / `FlightHistoryResponse` / `StatsResponse` (egress). |
+| `util/UsTailNumber.java` | Derives a US tail number from icao24. The FAA encodes N-numbers directly into the A00001-ADF7C7 block, so this is a pure function — no lookup, no API call. Returns null outside that block; other countries allocate from registries and cannot be derived. |
 
 Frontend is a single file: `src/main/resources/static/index.html` — styles,
 markup and all JS inline. No build step, no npm. Leaflet and markercluster come
@@ -150,49 +151,65 @@ rotation 0, so the CSS `rotate()` takes the compass heading verbatim (0 = north,
 is font-dependent — it pointed east, which put the *left wing* on the course
 line. Don't go back to a glyph; keep the geometry in the SVG path.
 
-Markers are cluster-managed (`L.markerClusterGroup`, clustering off above
-zoom 7) and the whole layer is `clearLayers()`-ed and rebuilt on every 15s poll.
+There is **no marker clustering** — it was removed deliberately; every aircraft
+draws individually. What keeps that affordable is viewport culling (see below),
+not clustering. Don't reintroduce `L.markerClusterGroup`: it indexes marker
+positions on insert and does not reindex on `setLatLng`, so moving markers
+inside a cluster group corrupts it, which rules it out for dead reckoning.
 
 ## If you are here for dead reckoning
 
-The data plumbing is in place; the animation is not.
+The groundwork is done. What remains is the extrapolation itself.
 
-**Already done:** `time_position` and `last_contact` are captured from OpenSky
-(raw indices 3 and 4), persisted on `PositionSnapshot`, and exposed on
-`FlightResponse` as `timePosition` / `lastContact` in **Unix epoch seconds**, so
-the browser can do elapsed-time math without parsing. `FlightResponse` also
-carries `velocityMps` alongside `velocityKnots` so extrapolation does not have to
-un-convert.
+**Backend (done).** `time_position` and `last_contact` are captured from OpenSky
+(raw indices 3 and 4), persisted on `PositionSnapshot`, and served on
+`FlightResponse` as `timePosition` / `lastContact` in **Unix epoch seconds**.
+`velocityMps` is served alongside `velocityKnots` so nothing has to un-convert.
+
+**Frontend (done).** `index.html` no longer rebuilds the map each poll:
+
+- `tracks` — a `Map` of `icao24 -> { marker, fix, drawn, attached }`. Markers
+  persist across polls, so they can be moved rather than recreated.
+- `fix` is the last known truth (position, course, `speedMps`, `epochSeconds`);
+  `drawn` is what is currently on screen, so no-op renders are skipped.
+- **Viewport culling** in `renderTracks()`. The registry holds every active
+  aircraft, but only those inside `map.getBounds().pad(VIEWPORT_PAD)` are
+  attached to `flightLayer`, so the DOM carries the few hundred markers on
+  screen rather than thousands nationwide. `moveend` re-runs it. A culled track
+  keeps absorbing fixes while detached, so it is correct the moment it returns.
+  Re-attaching calls `setIcon` because Leaflet rebuilds the element from
+  `options.icon`, which would otherwise resurrect the creation-time rotation.
+- `projectPosition()` — great-circle destination point, handles the
+  antimeridian, no-ops on null speed/heading.
+- `unwrapHeading(from, to)` — nearest equivalent angle, so 350° → 10° travels
+  20° forward rather than 340° backward.
+- `fixEpochSeconds(flight)` / `fixAgeSeconds(epoch)` — fix time, preferring the
+  aircraft's own report and falling back to ingest time.
+- `applyRotation(entry, deg)` — sets the SVG transform directly. Rebuilding the
+  icon per frame would reparse HTML for every aircraft.
+- Popups use `setPopupContent` on update, so an open popup is not closed.
 
 **Why fix age matters:** `PositionSnapshot.timestamp` is when *our ingest job
-wrote the row*, not when the aircraft reported. Those differ by the poll latency
-plus however stale OpenSky's own data was — an aircraft outside receiver coverage
-can be returned with a `time_position` many minutes old. Extrapolating from the
-wrong epoch places the aircraft confidently in the wrong place: at 450 kts a jet
-covers 7.5 nm per minute, so a 3-minute-stale fix treated as fresh and pushed
-2 minutes forward lands the icon ~15 nm off, moving smoothly and looking correct.
-Always extrapolate from `timePosition`, falling back to `timestamp` only when it
-is null.
+wrote the row*, not when the aircraft reported. Those differ by poll latency plus
+OpenSky's own staleness — an aircraft outside receiver coverage is returned with
+a `time_position` many minutes old. Extrapolating from the wrong epoch places the
+aircraft confidently in the wrong place: at 450 kts a jet covers 7.5 nm per
+minute, so a 3-minute-stale fix treated as fresh and pushed 2 minutes forward
+lands the icon ~15 nm off, moving smoothly and looking correct. Always
+extrapolate from `timePosition`.
 
-**Still to do, in order:**
+**Remaining work — all of it inside `renderTracks()`**, which is the single hook
+point. It currently draws `entry.fix` verbatim:
 
-1. **Give markers stable identity.** `updateFlights()` currently calls
-   `flightLayer.clearLayers()` and rebuilds every marker each poll, so nothing
-   persists to animate. Key markers by `icao24` in a `Map`, then add/update/remove
-   against it instead of clearing.
-2. **Separate the data tick from the render tick.** The fetch stays on its
-   interval; add a `requestAnimationFrame` loop that advances each marker from its
-   last known fix. There is plenty of headroom — the page polls far more often
-   than the data actually changes.
-3. **Bound the extrapolation.** Decide a maximum age (2 minutes is a reasonable
-   start) past which you stop moving the icon and fade or drop it. Without a
-   bound, aircraft that lost coverage sail off across the map forever.
-4. **Great-circle forward projection**, not flat-earth. From lat/lon, `heading`
-   (degrees true) and `velocityMps` over elapsed seconds, use the standard
-   destination-point formula; a linear lat/lon offset visibly drifts at altitude
-   and high latitude.
-5. **Interpolate rotation the short way.** Heading wraps at 360, so animating
-   350° → 10° must go forward 20°, not backward 340°.
-6. **Snap, don't jump.** When a real fix arrives it will disagree with the
-   extrapolated position. Ease the marker to the true position over a few hundred
-   ms rather than teleporting it.
+1. Replace the raw `fix` position with
+   `projectPosition(fix.lat, fix.lon, fix.heading, fix.speedMps, age)` where
+   `age = fixAgeSeconds(fix.epochSeconds)`.
+2. Drive it from a `requestAnimationFrame` loop instead of only on poll. The
+   culling already limits work to on-screen tracks; skip detached ones.
+3. Bound the extrapolation. Past a maximum age (start around 120s), stop moving
+   the icon and fade it — otherwise aircraft that lost coverage sail off the map
+   forever.
+4. Ease onto new fixes. When a real position arrives it will disagree with the
+   extrapolated one; interpolate over a few hundred ms rather than teleporting.
+5. Skip aircraft with `onGround` true, and any with null heading or speed —
+   `projectPosition` already no-ops on those, but they should not animate.
