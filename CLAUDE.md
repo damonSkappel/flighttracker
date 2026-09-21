@@ -157,59 +157,61 @@ not clustering. Don't reintroduce `L.markerClusterGroup`: it indexes marker
 positions on insert and does not reindex on `setLatLng`, so moving markers
 inside a cluster group corrupts it, which rules it out for dead reckoning.
 
-## If you are here for dead reckoning
+## Dead reckoning
 
-The groundwork is done. What remains is the extrapolation itself.
+Implemented. Aircraft coast along their heading between polls instead of hopping
+every 15 seconds.
 
-**Backend (done).** `time_position` and `last_contact` are captured from OpenSky
-(raw indices 3 and 4), persisted on `PositionSnapshot`, and served on
-`FlightResponse` as `timePosition` / `lastContact` in **Unix epoch seconds**.
-`velocityMps` is served alongside `velocityKnots` so nothing has to un-convert.
+**How a position is produced.** For each visible track, every frame:
 
-**Frontend (done).** `index.html` no longer rebuilds the map each poll:
+```
+age      = now - fix.timePosition        seconds since the AIRCRAFT reported
+carried  = min(age, MAX_EXTRAPOLATION_S) capped, because an old fix may have turned
+distance = speed * carried               metres travelled
+delta    = distance / 6371008.8          that distance as an angle at Earth's centre
+position = great-circle destination from the fix, on bearing `heading`
+```
 
-- `tracks` — a `Map` of `icao24 -> { marker, fix, drawn, attached }`. Markers
-  persist across polls, so they can be moved rather than recreated.
-- `fix` is the last known truth (position, course, `speedMps`, `epochSeconds`);
-  `drawn` is what is currently on screen, so no-op renders are skipped.
-- **Viewport culling** in `renderTracks()`. The registry holds every active
-  aircraft, but only those inside `map.getBounds().pad(VIEWPORT_PAD)` are
-  attached to `flightLayer`, so the DOM carries the few hundred markers on
-  screen rather than thousands nationwide. `moveend` re-runs it. A culled track
-  keeps absorbing fixes while detached, so it is correct the moment it returns.
-  Re-attaching calls `setIcon` because Leaflet rebuilds the element from
-  `options.icon`, which would otherwise resurrect the creation-time rotation.
-- `projectPosition()` — great-circle destination point, handles the
-  antimeridian, no-ops on null speed/heading.
-- `unwrapHeading(from, to)` — nearest equivalent angle, so 350° → 10° travels
-  20° forward rather than 340° backward.
-- `fixEpochSeconds(flight)` / `fixAgeSeconds(epoch)` — fix time, preferring the
-  aircraft's own report and falling back to ingest time.
-- `applyRotation(entry, deg)` — sets the SVG transform directly. Rebuilding the
-  icon per frame would reparse HTML for every aircraft.
-- Popups use `setPopupContent` on update, so an open popup is not closed.
+`projectPosition()` is the great-circle step; a flat lat/lon offset drifts at
+altitude and high latitude. Everything derives from **absolute fix time**, never
+from accumulated per-frame deltas, so a backgrounded tab resumes correct rather
+than drifting.
 
-**Why fix age matters:** `PositionSnapshot.timestamp` is when *our ingest job
-wrote the row*, not when the aircraft reported. Those differ by poll latency plus
-OpenSky's own staleness — an aircraft outside receiver coverage is returned with
-a `time_position` many minutes old. Extrapolating from the wrong epoch places the
-aircraft confidently in the wrong place: at 450 kts a jet covers 7.5 nm per
-minute, so a 3-minute-stale fix treated as fresh and pushed 2 minutes forward
-lands the icon ~15 nm off, moving smoothly and looking correct. Always
-extrapolate from `timePosition`.
+**Why `timePosition` and not `timestamp`.** `PositionSnapshot.timestamp` is when
+our ingest job wrote the row; `timePosition` is when the aircraft actually
+reported. They differ by poll latency plus OpenSky's own staleness — an aircraft
+outside receiver coverage is returned with a `time_position` many minutes old.
+At 450 kts a jet covers 7.5 nm per minute, so extrapolating from the wrong epoch
+puts the icon miles from the aircraft, moving smoothly and looking correct.
 
-**Remaining work — all of it inside `renderTracks()`**, which is the single hook
-point. It currently draws `entry.fix` verbatim:
+**Three things the naive version gets wrong**, all handled:
 
-1. Replace the raw `fix` position with
-   `projectPosition(fix.lat, fix.lon, fix.heading, fix.speedMps, age)` where
-   `age = fixAgeSeconds(fix.epochSeconds)`.
-2. Drive it from a `requestAnimationFrame` loop instead of only on poll. The
-   culling already limits work to on-screen tracks; skip detached ones.
-3. Bound the extrapolation. Past a maximum age (start around 120s), stop moving
-   the icon and fade it — otherwise aircraft that lost coverage sail off the map
-   forever.
-4. Ease onto new fixes. When a real position arrives it will disagree with the
-   extrapolated one; interpolate over a few hundred ms rather than teleporting.
-5. Skip aircraft with `onGround` true, and any with null heading or speed —
-   `projectPosition` already no-ops on those, but they should not animate.
+1. **Unbounded coasting.** Past `MAX_EXTRAPOLATION_S` the icon stops advancing,
+   and from `STALE_FADE_S` it dims toward `STALE_MIN_OPACITY` so a coasting
+   aircraft visibly reads as less certain.
+2. **Fixes disagreeing with the guess.** When a real fix lands it will not match
+   where we had projected. `upsertTrack` records that gap as `entry.blend` and
+   `renderTracks` decays it over `SNAP_MS` with an ease-out, so the icon glides
+   onto the truth. Without this, every poll teleports every aircraft.
+3. **Heading wrap.** `unwrapHeading` rewrites the target as the nearest
+   equivalent angle, so 350° → 10° turns 20° forward rather than 340° backward.
+
+Aircraft that are `onGround`, or missing heading or speed, or slower than
+`MIN_ANIMATE_SPEED_MPS`, are drawn at their raw fix and never coast.
+
+**Cost.** The loop is `requestAnimationFrame`, throttled to
+`RENDER_INTERVAL_MS` (~15fps — aircraft move slowly enough on screen that more
+buys nothing visible). Viewport culling keeps it to the few hundred markers
+actually on screen. The trigonometry is not the bottleneck; the DOM writes are,
+so `entry.shown` records what is currently rendered and every write is skipped
+when the value has not changed.
+
+**Tuning** is the constants block near the top of the script:
+`MAX_EXTRAPOLATION_S`, `STALE_FADE_S`, `STALE_MIN_OPACITY`, `SNAP_MS`,
+`RENDER_INTERVAL_MS`, `MIN_ANIMATE_SPEED_MPS`. `MAX_EXTRAPOLATION_S` is set to
+roughly one poll interval: long enough to keep motion continuous between polls,
+short enough that an unseen turn cannot throw an icon absurdly far.
+
+**Known limitation.** The 5-minute poll makes this inherently approximate — a
+turn is invisible until the next fix. Shortening the poll needs OpenSky
+authentication first (see Gotchas).

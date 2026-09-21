@@ -173,6 +173,24 @@
     // pan does not pop markers in at the border.
     const VIEWPORT_PAD = 0.25;
 
+    // ─── Dead reckoning tuning ─────────────────────────────────────────────────
+
+    // Stop projecting once a fix is this old. Set to roughly one poll interval:
+    // long enough that aircraft keep moving between polls, short enough that a
+    // turn we never saw cannot throw the icon absurdly far off.
+    const MAX_EXTRAPOLATION_S = 300;
+    // Start dimming here, so a coasting icon visibly loses confidence.
+    const STALE_FADE_S = 120;
+    const STALE_MIN_OPACITY = 0.35;
+    // How long to bleed off the correction when a real fix disagrees with where
+    // we had guessed the aircraft was.
+    const SNAP_MS = 800;
+    // Aircraft move slowly in screen terms, so full refresh rate buys nothing
+    // visible and costs battery. ~15fps is indistinguishable here.
+    const RENDER_INTERVAL_MS = 66;
+    // Below this ground speed treat the aircraft as parked.
+    const MIN_ANIMATE_SPEED_MPS = 5;
+
     // ─── Geo helpers ───────────────────────────────────────────────────────────
     // Pure functions: no map or DOM state. These are what position extrapolation
     // will be built from.
@@ -368,8 +386,9 @@
      *             rebuilt -- this persistence is what animation requires
      *   fix,      last known truth from the server: position, course, speed and
      *             the epoch that position was reported at
-     *   drawn,    what is currently on screen, so renderTracks can skip no-ops
-     *   attached  whether the marker is currently seated in a layer
+     *   blend,    decaying correction applied while easing onto a new fix
+     *   shown,    what is currently on screen, so no-op DOM writes are skipped
+     *   attached  whether the marker is currently in the map layer
      * }
      */
     const tracks = new Map();
@@ -388,12 +407,52 @@
         };
     }
 
-    function upsertTrack(flight) {
+    /** An aircraft only coasts if it is airborne and actually moving. */
+    function isMoving(fix) {
+        return !fix.onGround
+            && fix.heading != null
+            && fix.speedMps != null
+            && fix.speedMps >= MIN_ANIMATE_SPEED_MPS;
+    }
+
+    /**
+     * Where this fix says the aircraft is *now*: its reported position carried
+     * forward along its heading for as long as the fix has been sitting unrefreshed.
+     * Capped at MAX_EXTRAPOLATION_S, because a fix old enough to be stale is also
+     * old enough that the aircraft may have turned.
+     */
+    function extrapolate(fix, nowMs) {
+        const rawAge = fixAgeSeconds(fix.epochSeconds, nowMs);
+        const age = rawAge == null ? 0 : Math.max(0, rawAge);
+        const carried = isMoving(fix) ? Math.min(age, MAX_EXTRAPOLATION_S) : 0;
+        const projected = projectPosition(fix.lat, fix.lon, fix.heading, fix.speedMps, carried);
+        return { lat: projected[0], lon: projected[1], age: age };
+    }
+
+    /** Eases out, so the correction moves fast at first and settles gently. */
+    function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+    /** Opacity falls off as a fix ages, so a coasting icon reads as less certain. */
+    function staleOpacity(age) {
+        if (age <= STALE_FADE_S) return 1;
+        if (age >= MAX_EXTRAPOLATION_S) return STALE_MIN_OPACITY;
+        const t = (age - STALE_FADE_S) / (MAX_EXTRAPOLATION_S - STALE_FADE_S);
+        // Rounded so imperceptible changes do not each cost a style write.
+        return Math.round((1 - t * (1 - STALE_MIN_OPACITY)) * 100) / 100;
+    }
+
+    function planeSvg(entry) {
+        const el = entry.marker.getElement();
+        return el ? el.querySelector('.plane-icon') : null;
+    }
+
+    function upsertTrack(flight, nowMs) {
         const fix = toFix(flight);
         let entry = tracks.get(flight.icao24);
 
         if (!entry) {
-            const marker = L.marker([fix.lat, fix.lon], {
+            const spawn = extrapolate(fix, nowMs);
+            const marker = L.marker([spawn.lat, spawn.lon], {
                 icon: createAircraftIcon(fix.heading, fix.onGround)
             });
             marker.bindPopup(buildPopup(flight), {
@@ -402,26 +461,44 @@
             });
             entry = {
                 marker,
-                fix,
-                // The marker is constructed at this position with an icon built
-                // from this course, so `drawn` starts out matching -- otherwise
-                // the first render redundantly re-sets both.
-                drawn: {
-                    lat: fix.lat, lon: fix.lon,
-                    heading: fix.heading, onGround: fix.onGround
+                fix: fix,
+                blend: null,
+                // Matches what the marker was just built with, so the first
+                // render does not redundantly re-set position and icon.
+                shown: {
+                    lat: spawn.lat, lon: spawn.lon,
+                    heading: fix.heading, onGround: fix.onGround, opacity: 1
                 },
                 attached: false
             };
             tracks.set(flight.icao24, entry);
-        } else {
-            entry.fix = fix;
-            // setPopupContent rather than rebind: rebinding closes a popup the
-            // user currently has open.
-            if (entry.marker.getPopup()) {
-                entry.marker.setPopupContent(buildPopup(flight));
-            }
+            return entry;
         }
 
+        // A real fix has arrived and it will not agree with where we had guessed
+        // the aircraft was. Record that disagreement and let it decay, so the
+        // icon glides onto the truth instead of teleporting to it.
+        const guessed = extrapolate(entry.fix, nowMs);
+        const previousHeading = entry.fix.heading;
+        entry.fix = fix;
+        const truth = extrapolate(fix, nowMs);
+
+        let headingGap = 0;
+        if (previousHeading != null && fix.heading != null) {
+            headingGap = unwrapHeading(fix.heading, previousHeading) - fix.heading;
+        }
+        const latGap = guessed.lat - truth.lat;
+        const lonGap = guessed.lon - truth.lon;
+
+        entry.blend = (latGap || lonGap || headingGap)
+            ? { dLat: latGap, dLon: lonGap, dHeading: headingGap, startMs: nowMs }
+            : null;
+
+        if (entry.marker.getPopup()) {
+            // setPopupContent rather than rebind: rebinding closes a popup the
+            // user currently has open.
+            entry.marker.setPopupContent(buildPopup(flight));
+        }
         return entry;
     }
 
@@ -434,32 +511,46 @@
     }
 
     /**
-     * Draws every track at its current position. This is the single hook point
-     * for dead reckoning: today it renders the raw fix, and extrapolation means
-     * projecting `fix` forward by its age here before drawing.
+     * Draws every track where it should be at `nowMs`: the last fix carried
+     * forward, plus whatever is left of the correction from the most recent one.
+     * Runs on the animation loop, so this is the hot path -- values are computed
+     * freely but only written to the DOM when they actually changed.
      */
-    function renderTracks() {
+    function renderTracks(nowMs) {
         const bounds = map.getBounds().pad(VIEWPORT_PAD);
 
         for (const entry of tracks.values()) {
             const fix = entry.fix;
-            const drawn = entry.drawn;
+            const target = extrapolate(fix, nowMs);
 
-            if (fix.lat !== drawn.lat || fix.lon !== drawn.lon) {
-                entry.marker.setLatLng([fix.lat, fix.lon]);
-                drawn.lat = fix.lat;
-                drawn.lon = fix.lon;
+            let lat = target.lat;
+            let lon = target.lon;
+            let heading = fix.heading;
+
+            if (entry.blend) {
+                const t = (nowMs - entry.blend.startMs) / SNAP_MS;
+                if (t >= 1) {
+                    entry.blend = null;
+                } else {
+                    const remaining = 1 - easeOutCubic(t);
+                    lat += entry.blend.dLat * remaining;
+                    lon += entry.blend.dLon * remaining;
+                    if (heading != null) heading += entry.blend.dHeading * remaining;
+                }
             }
 
-            const visible = bounds.contains(entry.marker.getLatLng());
+            const visible = bounds.contains([lat, lon]);
 
             if (visible && !entry.attached) {
                 // Re-attaching rebuilds the DOM element from options.icon, which
                 // would otherwise resurrect the rotation baked in at creation
                 // time, so hand it a correctly oriented icon on the way in.
-                entry.marker.setIcon(createAircraftIcon(fix.heading, fix.onGround));
-                drawn.heading = fix.heading;
-                drawn.onGround = fix.onGround;
+                entry.marker.setLatLng([lat, lon]);
+                entry.marker.setIcon(createAircraftIcon(heading, fix.onGround));
+                entry.shown = {
+                    lat: lat, lon: lon, heading: heading,
+                    onGround: fix.onGround, opacity: 1
+                };
                 flightLayer.addLayer(entry.marker);
                 entry.attached = true;
             } else if (!visible && entry.attached) {
@@ -469,22 +560,57 @@
 
             if (!entry.attached) continue;
 
+            const shown = entry.shown;
+
+            if (lat !== shown.lat || lon !== shown.lon) {
+                entry.marker.setLatLng([lat, lon]);
+                shown.lat = lat;
+                shown.lon = lon;
+            }
+
             // A change of ground state changes the icon's colour and size, so it
             // has to be rebuilt; a plain course change only moves the transform.
-            if (fix.onGround !== drawn.onGround) {
-                entry.marker.setIcon(createAircraftIcon(fix.heading, fix.onGround));
-                drawn.onGround = fix.onGround;
-                drawn.heading = fix.heading;
-            } else if (fix.heading != null && fix.heading !== drawn.heading) {
-                if (applyRotation(entry, normalizeHeading(fix.heading))) {
-                    drawn.heading = fix.heading;
+            if (fix.onGround !== shown.onGround) {
+                entry.marker.setIcon(createAircraftIcon(heading, fix.onGround));
+                shown.onGround = fix.onGround;
+                shown.heading = heading;
+                shown.opacity = 1;
+            } else if (heading != null && heading !== shown.heading) {
+                const svg = planeSvg(entry);
+                if (svg) {
+                    svg.style.transform = 'rotate(' + normalizeHeading(heading) + 'deg)';
+                    shown.heading = heading;
+                }
+            }
+
+            const opacity = staleOpacity(target.age);
+            if (opacity !== shown.opacity) {
+                const svg = planeSvg(entry);
+                if (svg) {
+                    svg.style.opacity = opacity;
+                    shown.opacity = opacity;
                 }
             }
         }
     }
 
-    // Panning or zooming changes which tracks are near the screen.
-    map.on('moveend', renderTracks);
+    // ─── Animation Loop ─────────────────────────────────────────────────────────
+
+    // Independent of the fetch cycle: the server is polled every 15s, but the map
+    // redraws continuously so aircraft coast between fixes rather than hopping.
+    // requestAnimationFrame pauses itself in a background tab, and because every
+    // position is derived from absolute fix time rather than accumulated deltas,
+    // returning to the tab lands aircraft exactly where they belong.
+    let lastRenderMs = 0;
+
+    function animationTick() {
+        const nowMs = Date.now();
+        if (nowMs - lastRenderMs >= RENDER_INTERVAL_MS) {
+            lastRenderMs = nowMs;
+            renderTracks(nowMs);
+        }
+        requestAnimationFrame(animationTick);
+    }
 
     // ─── Fetch and Render ───────────────────────────────────────────────────────
 
@@ -502,15 +628,16 @@
 
             const flights = await response.json();
 
+            const nowMs = Date.now();
             const seen = new Set();
             flights.forEach(flight => {
                 // Skip aircraft with no position data
                 if (flight.latitude == null || flight.longitude == null) return;
-                upsertTrack(flight);
+                upsertTrack(flight, nowMs);
                 seen.add(flight.icao24);
             });
             pruneTracks(seen);
-            renderTracks();
+            renderTracks(nowMs);
 
             countEl.textContent = seen.size.toLocaleString();
             updateEl.textContent = new Date().toLocaleTimeString();
@@ -529,6 +656,7 @@
 
     updateFlights();
     setInterval(updateFlights, 15000);
+    requestAnimationFrame(animationTick);
 
 </script>
 </body>
