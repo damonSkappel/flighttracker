@@ -15,9 +15,12 @@ frontend served as a static resource. Deployed to Azure App Service at
 ./mvnw spring-boot:run      # needs Postgres on localhost:5433
 ```
 
-There is one test file (`FlighttrackerApplicationTests`) and it is an empty
-context-load stub. There is effectively **no test coverage** — verify changes by
-running the app, not by running tests.
+Test coverage is thin. `FlighttrackerApplicationTests` is an empty context-load
+stub that needs a live database. `OpenSkyAuthCheck` is real: it runs the client
+against a stub HTTP server and covers the bearer token, the refresh-and-retry on
+a 401, token caching, and the anonymous fallback — run it with
+`./mvnw test -Dtest=OpenSkyAuthCheck`, no database needed. Everything else is
+verified by running the app.
 
 ## Request path in one picture
 
@@ -50,7 +53,8 @@ static/index.html  (Leaflet + markercluster, all inline)
 |---|---|
 | `FlighttrackerApplication.java` | Entry point. Loads `.env` into system properties before boot (no-op in prod). |
 | `scheduler/FlightPollingScheduler.java` | `poll()` every 5 min; `cleanupOldSnapshots()` hourly, deletes snapshots >24h old. |
-| `service/OpenSkyClient.java` | Single hardcoded URL with the US bbox. Swallows all exceptions → returns empty list. |
+| `service/OpenSkyClient.java` | Fetches state vectors. Sends a bearer token when credentials are configured, refreshes once on a 401, logs remaining credits, and reports a 429 distinctly. Returns an empty list on any failure. |
+| `service/OpenSkyTokenManager.java` | OAuth2 client-credentials token, cached and refreshed 60s before expiry. Dormant with no credentials configured. |
 | `service/FlightIngestionService.java` | Batching + logging only. Holds the `IngestResult` record. |
 | `service/FlightIngestionBatchService.java` | The `@Transactional` write. **Separate class on purpose** — see "Gotchas". |
 | `service/FlightQueryService.java` | All read logic + unit conversion (m→ft, m/s→kts) + haversine. |
@@ -100,6 +104,11 @@ for Azure's health check to notice. On a large table, create it by hand with
 - `.env` (gitignored, untracked) — local `DB_*` values.
 - `flighttracker.active-window-minutes` (default 15) — how long an aircraft
   stays "active" after its last snapshot.
+- `OPENSKY_CLIENT_ID` / `OPENSKY_CLIENT_SECRET` — OAuth2 client credentials from
+  https://opensky-network.org/my-opensky/account. Blank means anonymous tier.
+  `opensky.states-url` and `opensky.credits-per-call` are overridable together if
+  the bounding box changes — they must stay consistent or the "polls left"
+  estimate in the logs will lie.
 - `flighttracker.retention-hours` (default 6) — snapshot retention; the hourly
   in-process cleanup job deletes past this. It only runs while the JVM is up,
   so Azure **Always On** must be enabled or both cleanup and polling stop when
@@ -124,9 +133,22 @@ sampling at 0 — App Insights was disabled to resolve an agent conflict
    proxy-based, so a self-invocation inside one class would bypass it. That was
    fixed in commit 0078d79 — do not merge `FlightIngestionBatchService` back
    into `FlightIngestionService`.
-2. **Polling is deliberately slow (5 min).** Commit 2e7a71a widened it to avoid
-   exhausting the free anonymous OpenSky quota. Don't tighten it without
-   adding authentication first.
+2. **Polling is deliberately slow (5 min), and the credit budget is why.**
+   OpenSky prices `/states/all` by bounding box area: this box is 25° × 59° =
+   1,475 sq°, which is over the 400 sq° threshold and so costs **4 credits per
+   call**. At a 5-minute poll that is ~1,120 credits/day.
+
+   | Tier | Credits/day |
+   |---|---|
+   | Anonymous (per IP) | 400 |
+   | Registered (free) | 4,000 |
+   | Active feeder | 8,000 |
+
+   Anonymous therefore runs dry about 8 hours in, after which every poll 429s
+   and — because nothing refreshes — the whole map ages out of the activity
+   window and goes empty. Set `OPENSKY_CLIENT_ID` / `OPENSKY_CLIENT_SECRET` to
+   run authenticated. Before shortening the poll, do the credit arithmetic:
+   `(86400 / interval_seconds) × 4` must stay under the tier's budget.
 3. **`flighttracker.active-window-minutes` must stay well above the poll
    interval.** They answer different questions and were once both 5 minutes,
    which meant every aircraft expired before its replacement landed and
