@@ -6,10 +6,9 @@ import com.damonskappel.flighttracker.service.FlightIngestionService;
 import com.damonskappel.flighttracker.service.OpenSkyClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
-import com.damonskappel.flighttracker.repository.PositionSnapshotRepository;
-import java.time.temporal.ChronoUnit;
+import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -24,13 +23,25 @@ public class FlightPollingScheduler {
     private final FlightIngestionService flightIngestionService;
     private final PositionSnapshotRepository snapshotRepository;
 
-    public FlightPollingScheduler(OpenSkyClient openSkyClient, FlightIngestionService flightIngestionService, PositionSnapshotRepository snapshotRepository) {
+    /**
+     * How much snapshot history to keep. Shorter retention keeps the table small,
+     * which is what makes the per-aircraft "latest snapshot" lookup cheap. At a
+     * 5-minute poll this is still 12 history points per aircraft per hour.
+     */
+    private final int retentionHours;
 
+    public FlightPollingScheduler(OpenSkyClient openSkyClient,
+                                  FlightIngestionService flightIngestionService,
+                                  PositionSnapshotRepository snapshotRepository,
+                                  @Value("${flighttracker.retention-hours:6}") int retentionHours) {
         this.openSkyClient = openSkyClient;
         this.flightIngestionService = flightIngestionService;
         this.snapshotRepository = snapshotRepository;
+        this.retentionHours = retentionHours;
     }
 
+    // Deliberately slow: the free anonymous OpenSky tier is easy to exhaust.
+    // Do not tighten without adding authentication first.
     @Scheduled(fixedDelay = 300000, initialDelay = 5000)
     public void poll() {
         log.info("Starting OpenSky poll cycle");
@@ -46,13 +57,9 @@ public class FlightPollingScheduler {
     }
 
     @Scheduled(fixedDelay = 3600000, initialDelay = 60000)
-    public void cleanupOldSnapshots(){
-        log.info("Running snapshot cleanup");
-        snapshotRepository.deleteSnapshotsOlderThan(
-                Instant.now().minus(24, ChronoUnit.HOURS)
-        );
+    public void cleanupOldSnapshots() {
+        Instant cutoff = Instant.now().minus(retentionHours, ChronoUnit.HOURS);
+        int deleted = snapshotRepository.deleteSnapshotsOlderThan(cutoff);
+        log.info("Snapshot cleanup removed {} rows older than {}h", deleted, retentionHours);
     }
-
-
-
 }

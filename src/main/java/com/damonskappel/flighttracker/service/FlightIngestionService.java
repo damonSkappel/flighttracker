@@ -21,19 +21,19 @@ public class FlightIngestionService {
     }
 
     public void ingest(List<OpenSkyStateVector> states) {
-        int total = 0;
-        int skipped = 0;
+        int saved = 0;
+        int skippedNoId = 0;
+        int skippedNoPosition = 0;
 
-        List<List<OpenSkyStateVector>> batches = partition(states, BATCH_SIZE);
-
-        for (List<OpenSkyStateVector> batch : batches) {
+        for (List<OpenSkyStateVector> batch : partition(states, BATCH_SIZE)) {
             IngestResult result = batchService.processBatch(batch);
-            total += result.saved();
-            skipped += result.skipped();
+            saved += result.saved();
+            skippedNoId += result.skippedNoId();
+            skippedNoPosition += result.skippedNoPosition();
         }
 
-        log.info("Ingested {} aircraft, {} snapshots saved, {} skipped",
-                states.size() - skipped, total, skipped);
+        log.info("Ingest complete: {} received, {} snapshots saved, {} skipped (no position), {} skipped (no icao24)",
+                states.size(), saved, skippedNoPosition, skippedNoId);
     }
 
     private <T> List<List<T>> partition(List<T> list, int size) {
@@ -44,5 +44,5 @@ public class FlightIngestionService {
         return partitions;
     }
 
-    public record IngestResult(int saved, int skipped) {}
+    public record IngestResult(int saved, int skippedNoId, int skippedNoPosition) {}
 }

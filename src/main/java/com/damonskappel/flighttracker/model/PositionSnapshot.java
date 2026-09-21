@@ -2,12 +2,16 @@ package com.damonskappel.flighttracker.model;
 
 import jakarta.persistence.*;
 import java.time.Instant;
-import jakarta.persistence.Index;
 
 @Entity
 @Table(name = "position_snapshots",
-indexes = @Index(name = "idx_snapshot_timestamp", columnList = "timestamp"))
-
+        indexes = {
+                @Index(name = "idx_snapshot_timestamp", columnList = "timestamp"),
+                // Supports "latest snapshot per aircraft" and the history lookups.
+                // Postgres does not index FK columns automatically, and without
+                // this both degrade to full table scans.
+                @Index(name = "idx_snapshot_icao24_timestamp", columnList = "icao24, timestamp")
+        })
 public class PositionSnapshot {
 
     @Id
@@ -18,8 +22,21 @@ public class PositionSnapshot {
     @JoinColumn(name = "icao24", nullable = false)
     private Aircraft aircraft;
 
+    /** When this row was written by the ingest job — NOT when the aircraft reported. */
     @Column(name = "timestamp", nullable = false)
     private Instant timestamp;
+
+    /**
+     * OpenSky "time_position": when the aircraft actually reported this position.
+     * This is the epoch dead reckoning must extrapolate from. Null when the
+     * aircraft has never sent a position.
+     */
+    @Column(name = "time_position")
+    private Instant timePosition;
+
+    /** OpenSky "last_contact": last time any signal was received from the aircraft. */
+    @Column(name = "last_contact")
+    private Instant lastContact;
 
     @Column(name = "latitude")
     private Double latitude;
@@ -52,6 +69,12 @@ public class PositionSnapshot {
 
     public Instant getTimestamp() { return timestamp; }
     public void setTimestamp(Instant timestamp) { this.timestamp = timestamp; }
+
+    public Instant getTimePosition() { return timePosition; }
+    public void setTimePosition(Instant timePosition) { this.timePosition = timePosition; }
+
+    public Instant getLastContact() { return lastContact; }
+    public void setLastContact(Instant lastContact) { this.lastContact = lastContact; }
 
     public Double getLatitude() { return latitude; }
     public void setLatitude(Double latitude) { this.latitude = latitude; }

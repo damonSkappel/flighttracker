@@ -118,6 +118,18 @@
             color: #eee;
             font-weight: 500;
         }
+        .aircraft-icon {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .plane-icon {
+            /* Rotate about the centre so the anchor stays on the position fix. */
+            transform-origin: 50% 50%;
+            display: block;
+        }
+
         .leaflet-tile {
             filter: invert(100%) hue-rotate(180deg) brightness(85%) contrast(90%) saturate(60%);
         }
@@ -189,30 +201,51 @@
     }).addTo(map);
     // ─── Aircraft Icon ──────────────────────────────────────────────────────────
 
+    // Nose points to 12 o'clock at rotation 0, so the CSS rotation is the
+    // compass heading verbatim (0 = north, 90 = east). Drawn as inline SVG
+    // rather than the U+2708 glyph: that glyph's resting orientation is
+    // font-dependent (it pointed east here, putting the left wing on the
+    // course line), and it renders as a color emoji on some platforms.
+    const PLANE_PATH = 'M12 2 L13.5 7.5 L22 13 L22 15 L13.5 12.5 L13.5 18.5 '
+        + 'L16 20.5 L16 22 L12 20.8 L8 22 L8 20.5 L10.5 18.5 L10.5 12.5 '
+        + 'L2 15 L2 13 L10.5 7.5 Z';
+
     function createAircraftIcon(heading, onGround) {
         const color = onGround ? '#888888' : '#4fc3f7';
-        const size = onGround ? 13 : 16;
+        const size = onGround ? 16 : 20;
+        const rotation = heading != null ? heading : 0;
+
         return L.divIcon({
-            html: `<div style="
-                font-size: ${size}px;
-                color: ${color};
-                transform: rotate(${heading || 0}deg);
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                width: 20px;
-                height: 20px;
-            ">✈</div>`,
-            className: '',
-            iconSize: [20, 20],
-            iconAnchor: [10, 10]
+            html: `<svg class="plane-icon" viewBox="0 0 24 24" width="${size}" height="${size}"
+                 style="transform: rotate(${rotation}deg);">
+                <path d="${PLANE_PATH}" fill="${color}"
+                      stroke="rgba(10,10,26,0.85)" stroke-width="0.75"
+                      stroke-linejoin="round"/>
+            </svg>`,
+            className: 'aircraft-icon',
+            iconSize: [size, size],
+            iconAnchor: [size / 2, size / 2]
         });
     }
 
     // ─── Popup Content ──────────────────────────────────────────────────────────
 
+    // Popup HTML is assembled as a string and handed to bindPopup, which assigns
+    // it as innerHTML. Callsign and country originate from OpenSky -- operator-
+    // supplied strings relayed by a public network -- so they are untrusted and
+    // must never reach the parser as markup.
+    function esc(value) {
+        if (value == null) return '';
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
     function buildPopup(flight) {
-        const callsign = flight.callsign || flight.icao24 || 'Unknown';
+        const callsign = esc(flight.callsign || flight.icao24 || 'Unknown');
         const altitude = flight.altitudeFeet != null
             ? Math.round(flight.altitudeFeet).toLocaleString() + ' ft'
             : '—';
@@ -233,11 +266,11 @@
                 <div class="popup-callsign">${callsign}</div>
                 <div class="popup-row">
                     <span class="label">ICAO24</span>
-                    <span class="val">${flight.icao24}</span>
+                    <span class="val">${esc(flight.icao24)}</span>
                 </div>
                 <div class="popup-row">
                     <span class="label">Country</span>
-                    <span class="val">${flight.originCountry || '—'}</span>
+                    <span class="val">${esc(flight.originCountry) || '—'}</span>
                 </div>
                 <div class="popup-row">
                     <span class="label">Status</span>

@@ -7,6 +7,8 @@ import com.damonskappel.flighttracker.model.Aircraft;
 import com.damonskappel.flighttracker.model.PositionSnapshot;
 import com.damonskappel.flighttracker.repository.AircraftRepository;
 import com.damonskappel.flighttracker.repository.PositionSnapshotRepository;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,22 +27,34 @@ public class FlightQueryService {
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
                     .withZone(ZoneOffset.UTC);
 
+    /** Miles per degree of latitude; good enough for a bounding-box prefilter. */
+    private static final double MILES_PER_DEGREE_LAT = 69.0;
+
     private final AircraftRepository aircraftRepository;
     private final PositionSnapshotRepository snapshotRepository;
 
+    /**
+     * How long an aircraft stays "active" after its last snapshot. Must stay
+     * comfortably larger than the poll interval: if the two are equal, every
+     * aircraft expires before its replacement lands and the map blanks out
+     * between polls.
+     */
+    private final int activeWindowMinutes;
+
     public FlightQueryService(AircraftRepository aircraftRepository,
-                              PositionSnapshotRepository snapshotRepository) {
+                              PositionSnapshotRepository snapshotRepository,
+                              @Value("${flighttracker.active-window-minutes:15}")
+                              int activeWindowMinutes) {
         this.aircraftRepository = aircraftRepository;
         this.snapshotRepository = snapshotRepository;
+        this.activeWindowMinutes = activeWindowMinutes;
     }
 
-    // GET /flights — all active aircraft in last 5 minutes
+    // GET /flights — latest position of every currently active aircraft
     @Transactional(readOnly = true)
     public List<FlightResponse> getActiveFlights() {
-        Instant cutoff = Instant.now().minus(5, ChronoUnit.MINUTES);
-
         List<PositionSnapshot> latestSnapshots =
-                snapshotRepository.findLatestSnapshotPerAircraft(cutoff);
+                snapshotRepository.findLatestSnapshotPerAircraft(activityCutoff());
 
         return latestSnapshots.stream()
                 .map(snapshot -> toFlightResponse(snapshot.getAircraft(), snapshot))
@@ -50,37 +64,50 @@ public class FlightQueryService {
     // GET /flights/{icao24} — one specific aircraft
     @Transactional(readOnly = true)
     public Optional<FlightResponse> getFlightByIcao24(String icao24) {
-        Optional<Aircraft> aircraft = aircraftRepository.findById(icao24);
-        if (aircraft.isEmpty()) return Optional.empty();
-
-        List<PositionSnapshot> history =
-                snapshotRepository.findHistoryByIcao24(icao24);
-        PositionSnapshot latest = history.isEmpty() ? null : history.get(0);
-
-        return Optional.of(toFlightResponse(aircraft.get(), latest));
+        Optional<PositionSnapshot> latest = snapshotRepository.findTopByAircraftIcao24OrderByTimestampDesc(icao24);
+        if (latest.isPresent()) {
+            return Optional.of(toFlightResponse(latest.get().getAircraft(), latest.get()));
+        }
+        // Known airframe that has no snapshot left in retention.
+        return aircraftRepository.findById(icao24)
+                .map(aircraft -> toFlightResponse(aircraft, null));
     }
 
-    // GET /flights/{icao24}/history — position history
+    // GET /flights/{icao24}/history — position history, newest first
     @Transactional(readOnly = true)
     public List<FlightHistoryResponse> getFlightHistory(String icao24, int limit) {
-        List<PositionSnapshot> snapshots =
-                snapshotRepository.findHistoryByIcao24(icao24);
+        List<PositionSnapshot> snapshots = snapshotRepository.findHistoryByIcao24(
+                icao24, PageRequest.of(0, limit));
 
         return snapshots.stream()
-                .limit(limit)
                 .map(this::toHistoryResponse)
                 .collect(Collectors.toList());
     }
 
-    // GET /flights/area — aircraft within radius miles of a point
+    // GET /flights/area — active aircraft within radius miles of a point
     @Transactional(readOnly = true)
     public List<FlightResponse> getFlightsInArea(double lat, double lon,
                                                  double radiusMiles) {
-        Instant cutoff = Instant.now().minus(5, ChronoUnit.MINUTES);
-        List<PositionSnapshot> recent =
-                snapshotRepository.findRecentWithCoordinates(cutoff);
+        double latDelta = radiusMiles / MILES_PER_DEGREE_LAT;
+        double minLat = Math.max(-90.0, lat - latDelta);
+        double maxLat = Math.min(90.0, lat + latDelta);
 
-        return recent.stream()
+        // Degrees of longitude shrink toward the poles. Near them, or when the box
+        // would wrap the antimeridian, fall back to the full range and let the
+        // haversine filter below do the real work.
+        double cosLat = Math.cos(Math.toRadians(lat));
+        double lonDelta = Math.abs(cosLat) < 1e-6
+                ? 180.0
+                : radiusMiles / (MILES_PER_DEGREE_LAT * Math.abs(cosLat));
+        boolean wraps = lonDelta >= 180.0 || lon - lonDelta < -180.0 || lon + lonDelta > 180.0;
+        double minLon = wraps ? -180.0 : lon - lonDelta;
+        double maxLon = wraps ? 180.0 : lon + lonDelta;
+
+        List<PositionSnapshot> candidates =
+                snapshotRepository.findLatestSnapshotPerAircraftInBox(
+                        activityCutoff(), minLat, maxLat, minLon, maxLon);
+
+        return candidates.stream()
                 .filter(p -> distanceMiles(lat, lon, p.getLatitude(), p.getLongitude())
                         <= radiusMiles)
                 .map(p -> toFlightResponse(p.getAircraft(), p))
@@ -106,6 +133,10 @@ public class FlightQueryService {
 
     // --- Private helpers ---
 
+    private Instant activityCutoff() {
+        return Instant.now().minus(activeWindowMinutes, ChronoUnit.MINUTES);
+    }
+
     private FlightResponse toFlightResponse(Aircraft aircraft,
                                             PositionSnapshot snapshot) {
         return new FlightResponse(
@@ -116,9 +147,12 @@ public class FlightQueryService {
                 snapshot != null ? snapshot.getLongitude() : null,
                 snapshot != null ? toFeet(snapshot.getBaroAltitude()) : null,
                 snapshot != null ? toKnots(snapshot.getVelocity()) : null,
+                snapshot != null ? snapshot.getVelocity() : null,
                 snapshot != null ? snapshot.getHeading() : null,
                 snapshot != null ? snapshot.getVerticalRate() : null,
                 snapshot != null ? snapshot.getOnGround() : null,
+                snapshot != null ? formatEpochSeconds(snapshot.getTimePosition()) : null,
+                snapshot != null ? formatEpochSeconds(snapshot.getLastContact()) : null,
                 aircraft.getLastSeen() != null
                         ? FORMATTER.format(aircraft.getLastSeen()) : null
         );
@@ -127,6 +161,7 @@ public class FlightQueryService {
     private FlightHistoryResponse toHistoryResponse(PositionSnapshot snapshot) {
         return new FlightHistoryResponse(
                 FORMATTER.format(snapshot.getTimestamp()),
+                formatEpochSeconds(snapshot.getTimePosition()),
                 snapshot.getLatitude(),
                 snapshot.getLongitude(),
                 toFeet(snapshot.getBaroAltitude()),
@@ -135,6 +170,11 @@ public class FlightQueryService {
                 snapshot.getVerticalRate(),
                 snapshot.getOnGround()
         );
+    }
+
+    /** Epoch seconds, so the browser can do elapsed-time math without parsing. */
+    private static Long formatEpochSeconds(Instant instant) {
+        return instant != null ? instant.getEpochSecond() : null;
     }
 
     private static double distanceMiles(double lat1, double lon1,

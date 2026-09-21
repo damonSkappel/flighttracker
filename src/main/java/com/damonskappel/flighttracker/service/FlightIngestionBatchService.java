@@ -12,6 +12,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * Holds the transactional write. Kept separate from {@link FlightIngestionService}
+ * on purpose: {@code @Transactional} is proxy-based, so calling this from a method
+ * in the same class would silently bypass the transaction.
+ */
 @Service
 public class FlightIngestionBatchService {
 
@@ -28,11 +33,18 @@ public class FlightIngestionBatchService {
     public FlightIngestionService.IngestResult processBatch(List<OpenSkyStateVector> batch) {
         Instant now = Instant.now();
         List<PositionSnapshot> snapshots = new ArrayList<>();
-        int skipped = 0;
+        int skippedNoId = 0;
+        int skippedNoPosition = 0;
 
         for (OpenSkyStateVector sv : batch) {
             if (sv.getIcao24() == null || sv.getIcao24().isBlank()) {
-                skipped++;
+                skippedNoId++;
+                continue;
+            }
+            // Aircraft that report no position serve no endpoint that renders one,
+            // and each would still cost an upsert. Drop them before any DB work.
+            if (!sv.hasPosition()) {
+                skippedNoPosition++;
                 continue;
             }
             aircraftRepository.upsert(
@@ -45,6 +57,8 @@ public class FlightIngestionBatchService {
             PositionSnapshot snapshot = new PositionSnapshot();
             snapshot.setAircraft(aircraft);
             snapshot.setTimestamp(now);
+            snapshot.setTimePosition(sv.getTimePosition());
+            snapshot.setLastContact(sv.getLastContact());
             snapshot.setLatitude(sv.getLatitude());
             snapshot.setLongitude(sv.getLongitude());
             snapshot.setBaroAltitude(sv.getBaroAltitude());
@@ -56,6 +70,7 @@ public class FlightIngestionBatchService {
         }
 
         positionSnapshotRepository.saveAll(snapshots);
-        return new FlightIngestionService.IngestResult(snapshots.size(), skipped);
+        return new FlightIngestionService.IngestResult(
+                snapshots.size(), skippedNoId, skippedNoPosition);
     }
 }

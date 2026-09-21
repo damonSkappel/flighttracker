@@ -1,3 +1,9 @@
+# NOTE: .github/workflows/deploy.yml does NOT use this file. CI ships the bare
+# jar via azure/webapps-deploy, so the ENTRYPOINT below (including the prod
+# profile flag) does not run in production -- there the prod profile is active
+# only because SPRING_PROFILES_ACTIVE is set in Azure App Settings. Keep both in
+# sync, or switch the workflow to a container build.
+
 # Stage 1 — Build
 FROM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /app
