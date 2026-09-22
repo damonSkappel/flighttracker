@@ -177,9 +177,14 @@
 
     // Stop projecting once a fix is this old. Set to roughly one poll interval:
     // long enough that aircraft keep moving between polls, short enough that a
-    // turn we never saw cannot throw the icon absurdly far off.
-    const MAX_EXTRAPOLATION_S = 300;
-    // Start dimming here, so a coasting icon visibly loses confidence.
+    // turn we never saw cannot throw the icon absurdly far off. This matters:
+    // OpenSky does return aircraft whose last position report is well over an
+    // hour old, and projecting one of those forward unbounded would place it
+    // hundreds of miles away, moving smoothly and looking entirely correct.
+    const MAX_EXTRAPOLATION_S = 150;
+    // Start dimming here, so a coasting icon visibly loses confidence. Sits just
+    // under one poll interval plus OpenSky's own ~20s lag, so a normally
+    // refreshed aircraft only dims at the very end of a cycle.
     const STALE_FADE_S = 120;
     const STALE_MIN_OPACITY = 0.35;
     // How long to bleed off the correction when a real fix disagrees with where

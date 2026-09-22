@@ -40,9 +40,13 @@ public class FlightPollingScheduler {
         this.retentionHours = retentionHours;
     }
 
-    // Deliberately slow: the free anonymous OpenSky tier is easy to exhaust.
-    // Do not tighten without adding authentication first.
-    @Scheduled(fixedDelay = 300000, initialDelay = 5000)
+    // Paced against the OpenSky credit budget, not against what the map wants.
+    // This bounding box is 1475 sq deg, so every call costs 4 credits; at 2
+    // minutes that is 720 calls a day, 2880 credits, against the 4000/day an
+    // authenticated account gets. Do the arithmetic before shortening it
+    // further: (86400 / intervalSeconds) * 4 must stay under the tier budget,
+    // and running anonymous drops that budget to 400.
+    @Scheduled(fixedDelay = 120000, initialDelay = 5000)
     public void poll() {
         log.info("Starting OpenSky poll cycle");
 

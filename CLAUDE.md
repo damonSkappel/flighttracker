@@ -136,10 +136,10 @@ sampling at 0 — App Insights was disabled to resolve an agent conflict
    proxy-based, so a self-invocation inside one class would bypass it. That was
    fixed in commit 0078d79 — do not merge `FlightIngestionBatchService` back
    into `FlightIngestionService`.
-2. **Polling is deliberately slow (5 min), and the credit budget is why.**
+2. **The poll interval is set by the credit budget, not by what the map wants.**
    OpenSky prices `/states/all` by bounding box area: this box is 25° × 59° =
    1,475 sq°, which is over the 400 sq° threshold and so costs **4 credits per
-   call**. At a 5-minute poll that is ~1,120 credits/day.
+   call**. At the current 2-minute poll that is 720 calls = **2,880 credits/day**.
 
    | Tier | Credits/day |
    |---|---|
@@ -151,7 +151,14 @@ sampling at 0 — App Insights was disabled to resolve an agent conflict
    and — because nothing refreshes — the whole map ages out of the activity
    window and goes empty. Set `OPENSKY_CLIENT_ID` / `OPENSKY_CLIENT_SECRET` to
    run authenticated. Before shortening the poll, do the credit arithmetic:
-   `(86400 / interval_seconds) × 4` must stay under the tier's budget.
+   `(86400 / interval_seconds) × 4` must stay under the tier's budget. At 2
+   minutes that is 72% of an authenticated budget, so there is not much room
+   left.
+
+   **Four values move together** when the interval changes: `fixedDelay`,
+   `flighttracker.active-window-minutes` (≈3 cycles), and `MAX_EXTRAPOLATION_S`
+   (≈1 cycle) / `STALE_FADE_S` in index.html. Changing one alone produces a map
+   that either blanks between polls or dims aircraft that are actually fresh.
 3. **`flighttracker.active-window-minutes` must stay well above the poll
    interval.** They answer different questions and were once both 5 minutes,
    which meant every aircraft expired before its replacement landed and
