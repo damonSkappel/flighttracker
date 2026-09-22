@@ -16,10 +16,13 @@ frontend served as a static resource. Deployed to Azure App Service at
 ```
 
 Test coverage is thin. `FlighttrackerApplicationTests` is an empty context-load
-stub that needs a live database. `OpenSkyAuthCheck` is real: it runs the client
-against a stub HTTP server and covers the bearer token, the refresh-and-retry on
-a 401, token caching, and the anonymous fallback — run it with
-`./mvnw test -Dtest=OpenSkyAuthCheck`, no database needed. Everything else is
+stub that needs a live database. Two real ones need no database:
+`OpenSkyAuthCheck` runs the client against a stub HTTP server and covers the
+bearer token, refresh-and-retry on a 401, token caching and the anonymous
+fallback. `IngestBatchingCheck` counts JDBC round trips and asserts the UTC
+timestamp binding, the icao24 dedupe and that malformed rows are dropped rather
+than failing a whole batch. Run both with
+`./mvnw test -Dtest='OpenSkyAuthCheck,IngestBatchingCheck'`. Everything else is
 verified by running the app.
 
 ## Request path in one picture
@@ -55,8 +58,8 @@ static/index.html  (Leaflet + markercluster, all inline)
 | `scheduler/FlightPollingScheduler.java` | `poll()` every 5 min; `cleanupOldSnapshots()` hourly, deletes snapshots >24h old. |
 | `service/OpenSkyClient.java` | Fetches state vectors. Sends a bearer token when credentials are configured, refreshes once on a 401, logs remaining credits, and reports a 429 distinctly. Returns an empty list on any failure. |
 | `service/OpenSkyTokenManager.java` | OAuth2 client-credentials token, cached and refreshed 60s before expiry. Dormant with no credentials configured. |
-| `service/FlightIngestionService.java` | Batching + logging only. Holds the `IngestResult` record. |
-| `service/FlightIngestionBatchService.java` | The `@Transactional` write. **Separate class on purpose** — see "Gotchas". |
+| `service/FlightIngestionService.java` | Dedupes by icao24, chunks, times the run. Holds the `IngestResult` record. |
+| `service/FlightIngestionBatchService.java` | The `@Transactional` write, via `JdbcTemplate` batches rather than JPA — see "Gotchas". **Separate class on purpose.** |
 | `service/FlightQueryService.java` | All read logic + unit conversion (m→ft, m/s→kts) + haversine. |
 | `repository/AircraftRepository.java` | Native `INSERT … ON CONFLICT` upsert. |
 | `repository/PositionSnapshotRepository.java` | JPQL queries incl. `findLatestSnapshotPerAircraft`. |
@@ -164,6 +167,25 @@ sampling at 0 — App Insights was disabled to resolve an agent conflict
 6. **Popup values are escaped via `esc()`** in index.html. Callsign and country
    come from OpenSky and are operator-supplied, so they are untrusted; popup
    HTML is assigned as innerHTML. Don't interpolate a new field without it.
+7. **Ingest writes through `JdbcTemplate`, not JPA, and must stay that way.**
+   Two batched statements per 500-row chunk — 22 round trips for a 5,340
+   aircraft poll, against 10,680 when each aircraft cost an upsert plus an
+   insert. That was ~124s of wall clock per poll.
+
+   Do not "simplify" this back to `repository.save`/`saveAll`.
+   `PositionSnapshot` uses `GenerationType.IDENTITY`, and Hibernate cannot
+   batch inserts for identity columns — it executes each one separately to read
+   back the generated key, which silently makes
+   `hibernate.jdbc.batch_size` inert. Raw JDBC sidesteps it because nothing
+   here needs the generated id.
+8. **Timestamps are bound as `OffsetDateTime` at UTC.** Both timestamp columns
+   are `timestamp(6) with time zone`. Binding a `java.sql.Timestamp` instead
+   would be interpreted through the JVM default zone and shift every row on any
+   host not set to UTC.
+9. **State vectors are deduplicated by icao24 before writing.** A repeat would
+   put two snapshots at an identical timestamp — which the latest-per-aircraft
+   query returns twice — and Postgres refuses to let `ON CONFLICT` touch the
+   same row twice within one statement.
 
 ## Map icons
 
