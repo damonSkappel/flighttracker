@@ -5,39 +5,28 @@ measured against production unless noted.
 
 ---
 
-## 1. Responses are not compressed — 6.5× on the wire, one property
+## ~~1. Responses are not compressed~~ — DONE
 
-**Measured:** `/flights` returns **2.01 MB** with no `Content-Encoding` header.
-The same payload gzips to **308 KB**.
-
-```properties
-server.compression.enabled=true
-server.compression.mime-types=application/json,text/html,text/css,application/javascript
-server.compression.min-response-size=1024
-```
-
-Traffic scales with viewers (the OpenSky poll does not — see §7), so this
-multiplies across every user. At a 15s browser poll one viewer currently pulls
-~480 MB/hour.
-
-**Risk:** essentially none. Costs a little CPU per response.
+`server.compression` enabled for JSON, HTML, CSS and JS above 1 KB. `/flights`
+was **2.01 MB** uncompressed and gzips to **~308 KB**. Verified against a
+locally booted jar: `Content-Encoding: gzip` present when requested, absent when
+not, and `index.html` measured 26,649 → 8,088 bytes.
 
 ---
 
-## 2. The browser polls 8× more often than the data changes
+## ~~2. The browser polls 8× more often than the data changes~~ — DONE
 
-`setInterval(updateFlights, 15000)` in index.html, against a server that
-refreshes every 120s. Seven of every eight responses are byte-identical.
+`FETCH_INTERVAL_MS` is now 60000, against a server that refreshes every 120s.
+Combined with §1 that is **~26× less traffic**: ~8 MB/min/user → ~308 KB/min.
 
-This was reasonable before dead reckoning, when a fetch was the only thing that
-moved an aircraft. It no longer is — icons animate continuously from the last
-fix, so a slower fetch looks the same on screen.
+This was only possible because of dead reckoning. Before it, a fetch was the
+only thing that moved an aircraft, so it had to be frequent; now icons coast
+from the last fix and a slower fetch looks identical on screen.
 
-Raising it to 60s cuts requests 4×. Combined with §1 that is **~26× less
-traffic**: 8 MB/min/user → ~308 KB/min/user.
-
-**Watch:** `flighttracker.active-window-minutes` (6) must stay comfortably above
-the browser interval too, not just the server poll.
+**`MAX_EXTRAPOLATION_S` moved with it, 150 → 210.** The browser can hold a fix
+for `OpenSky lag (~20s) + server poll (120s) + fetch interval (60s) = 200s`, and
+a cap below that freezes aircraft at the cap before their replacement lands.
+Shortening either interval should shorten the cap again.
 
 ---
 
@@ -68,25 +57,26 @@ startup for an uncertain gain, and the scheduler needs its beans anyway.
 
 ---
 
-## 4. `/flights` sends more than the map uses
+## 3b. `/flights` sends more than the map uses
 
 2.01 MB for ~6,000 aircraft is ~350 bytes each. Coordinates carry full double
 precision (`40.134899999999998`) when ~5 decimals is under a metre, and fields
-like `lastContact` and `originCountry` are not read by the map. Trimming and
-rounding could roughly halve it — do §1 first, since compression already removes
-most of the redundancy that verbosity creates.
+like `lastContact` and `originCountry` are not read by the map. Now that §1 has
+landed, compression already removes most of the redundancy that verbosity
+creates, so this is much lower value than it looked — measure before bothering.
 
 ---
 
-## 5. Serve a 304 when nothing changed
+## 3c. Serve a 304 when nothing changed
 
 Between server polls the payload is identical. An ETag over the newest snapshot
 timestamp would let unchanged requests return `304 Not Modified` with no body.
-Mostly redundant if §2 lands; worth it if the browser interval stays short.
+Largely redundant now that §2 has landed and the fetch interval is 60s against a
+120s refresh — at most one duplicate response per cycle.
 
 ---
 
-## 6. Hikari pool is 5 connections
+## 4. Hikari pool is 5 connections
 
 Fine today: each `/flights` query is well under a second and traffic is light.
 Worth revisiting if concurrent viewers reach the dozens, since every request
@@ -95,7 +85,7 @@ Postgres connection limit together.
 
 ---
 
-## 7. Not a problem — recorded so nobody "fixes" it
+## 5. Not a problem — recorded so nobody "fixes" it
 
 **OpenSky fetch cost does not scale with viewers.** The scheduler polls on a
 timer inside the app, so credit consumption is fixed at 720 calls/day no matter

@@ -175,13 +175,17 @@
 
     // ─── Dead reckoning tuning ─────────────────────────────────────────────────
 
-    // Stop projecting once a fix is this old. Set to roughly one poll interval:
-    // long enough that aircraft keep moving between polls, short enough that a
-    // turn we never saw cannot throw the icon absurdly far off. This matters:
-    // OpenSky does return aircraft whose last position report is well over an
-    // hour old, and projecting one of those forward unbounded would place it
-    // hundreds of miles away, moving smoothly and looking entirely correct.
-    const MAX_EXTRAPOLATION_S = 150;
+    // Stop projecting once a fix is this old. This matters: OpenSky does return
+    // aircraft whose last position report is well over an hour old, and
+    // projecting one of those forward unbounded would place it hundreds of miles
+    // away, moving smoothly and looking entirely correct.
+    //
+    // The floor is set by how stale a fix the browser can be holding:
+    //   OpenSky's own lag (~20s) + server poll (120s) + fetch interval (60s) = 200s
+    // Below that, aircraft freeze at the cap before their replacement arrives.
+    // Above it, we are guessing further than we need to. Both terms matter, so
+    // shortening FETCH_INTERVAL_MS or the server poll should shorten this too.
+    const MAX_EXTRAPOLATION_S = 210;
     // Start dimming here, so a coasting icon visibly loses confidence. Sits just
     // under one poll interval plus OpenSky's own ~20s lag, so a normally
     // refreshed aircraft only dims at the very end of a cycle.
@@ -193,6 +197,14 @@
     // Aircraft move slowly in screen terms, so full refresh rate buys nothing
     // visible and costs battery. ~15fps is indistinguishable here.
     const RENDER_INTERVAL_MS = 66;
+
+    // How often to ask the server for new fixes. This is deliberately far slower
+    // than the render loop: the server itself only refreshes every 120s, so a
+    // faster fetch just re-downloads identical data. Before dead reckoning a
+    // fetch was the only thing that moved an aircraft, so it had to be frequent;
+    // now icons coast between fixes and the map looks the same either way.
+    // Must stay well under flighttracker.active-window-minutes.
+    const FETCH_INTERVAL_MS = 60000;
     // Below this ground speed treat the aircraft as parked.
     const MIN_ANIMATE_SPEED_MPS = 5;
 
@@ -660,7 +672,7 @@
     // ─── Start ──────────────────────────────────────────────────────────────────
 
     updateFlights();
-    setInterval(updateFlights, 15000);
+    setInterval(updateFlights, FETCH_INTERVAL_MS);
     requestAnimationFrame(animationTick);
 
 </script>
