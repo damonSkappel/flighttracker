@@ -16,17 +16,19 @@ not, and `index.html` measured 26,649 → 8,088 bytes.
 
 ## ~~2. The browser polls 8× more often than the data changes~~ — DONE
 
-`FETCH_INTERVAL_MS` is now 60000, against a server that refreshes every 120s.
-Combined with §1 that is **~26× less traffic**: ~8 MB/min/user → ~308 KB/min.
+`FETCH_INTERVAL_MS` is now 30000, against a server that refreshes every 120s.
+Combined with §1 that is **~13× less traffic**: ~8 MB/min/user → ~616 KB/min.
+60s was tried first (~26×) and deliberately backed off to 30s, trading some
+bandwidth for a shorter extrapolation cap and therefore less guessing.
 
 This was only possible because of dead reckoning. Before it, a fetch was the
 only thing that moved an aircraft, so it had to be frequent; now icons coast
 from the last fix and a slower fetch looks identical on screen.
 
-**`MAX_EXTRAPOLATION_S` moved with it, 150 → 210.** The browser can hold a fix
-for `OpenSky lag (~20s) + server poll (120s) + fetch interval (60s) = 200s`, and
-a cap below that freezes aircraft at the cap before their replacement lands.
-Shortening either interval should shorten the cap again.
+**`MAX_EXTRAPOLATION_S` moved with it, 150 → 180.** The browser can hold a fix
+for `OpenSky lag (~20s) + server poll (120s) + fetch interval (30s) = 170s`, and
+a cap below that sum freezes aircraft at the cap before their replacement lands.
+Changing either interval should move the cap too.
 
 ---
 
@@ -71,8 +73,9 @@ creates, so this is much lower value than it looked — measure before bothering
 
 Between server polls the payload is identical. An ETag over the newest snapshot
 timestamp would let unchanged requests return `304 Not Modified` with no body.
-Largely redundant now that §2 has landed and the fetch interval is 60s against a
-120s refresh — at most one duplicate response per cycle.
+Less valuable now that §2 has landed: at a 30s fetch against a 120s refresh,
+about three of every four responses are still duplicates, so an ETag would cut
+most of the remaining bytes. Worth revisiting if viewer count grows.
 
 ---
 
