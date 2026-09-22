@@ -130,6 +130,12 @@ App Settings. If that setting is ever lost the app silently falls back to
 sampling at 0 — App Insights was disabled to resolve an agent conflict
 (commit 462294b). Not a bug.
 
+## Known performance work
+
+`PERFORMANCE.md` holds the measured backlog — uncompressed responses, the
+browser polling 8× faster than the data changes, and the 156s startup. It also
+records why the OpenSky fetch cost deliberately does *not* scale with viewers.
+
 ## Gotchas
 
 1. **Ingestion is split across two classes on purpose.** `@Transactional` is
