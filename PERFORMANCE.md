@@ -32,32 +32,46 @@ Changing either interval should move the cap too.
 
 ---
 
-## 3. Startup takes 156 seconds
+## 3. Startup takes 156 seconds — accepted, not a bug
 
 ```
 Started FlighttrackerApplication in 155.891 seconds (process running for 203.71)
 ```
 
-Not urgent — it only lengthens deploys. It becomes urgent near Azure's ~230s
-startup limit, where deploys begin failing health checks. That ~48s gap before
-Spring even starts is JVM boot and unpacking a 51 MB fat jar off App Service's
-network-mounted storage.
+Roughly 48s of that is JVM boot and unpacking a 51 MB fat jar before Spring
+starts; the remaining ~108s is Spring context initialisation. Both are
+CPU-bound, and the app runs on a low App Service tier where CPU is a fraction of
+a core. That is the dominant factor, not anything in the code.
 
-Try in this order, measuring one at a time:
+**The practical consequence:** every deploy takes the site down for ~2.5
+minutes. A request during that window gets `ERR_TIMED_OUT`, not an error page.
+Worth knowing when choosing deploy timing; it is not a symptom of a broken
+change.
 
-1. **`WEBSITE_RUN_FROM_PACKAGE=1`** (app setting, no code change) — runs the jar
-   from a mounted package instead of copying files onto the share.
-2. **Check the App Service tier.** On B1 you get a fraction of a CPU and JVM
-   startup is CPU-bound. Most likely explanation for the 48s.
-3. **`ddl-auto=update` → `validate`.** Every boot, Hibernate interrogates the
-   whole schema through JDBC metadata to discover that nothing changed. Requires
-   adopting Flyway first, since `update` is currently how schema changes ship
-   (that is how `time_position` and the indexes were created).
+**Explicitly ruled out by the owner — do not re-propose:**
 
-**Not recommended:** `spring.main.lazy-initialization=true`. It trades fail-fast
+- **Upgrading the App Service tier.** Would likely fix most of it, since this is
+  CPU-bound, but costs money and the current behaviour is fine for a portfolio
+  project.
+- **Deployment slots** (deploy to staging, let it warm, swap for zero-downtime).
+  The correct fix for the downtime, but requires Standard tier or above.
+
+**Free things still on the table, in order of effort:**
+
+1. **`WEBSITE_RUN_FROM_PACKAGE=1`** — an App Service environment variable, no
+   code change. Runs the jar from a mounted package instead of copying files onto
+   network storage, which can cut the pre-Spring portion. Cheapest thing to try;
+   measure the `Started ... in` line before and after.
+2. **`ddl-auto=update` → `validate`, behind Flyway.** Saves the schema
+   introspection Hibernate performs on every boot. Likely only a few seconds on
+   two tables, so this is mostly worth doing for migration hygiene rather than
+   for startup.
+
+**Not recommended:** `spring.main.lazy-initialization=true` trades fail-fast
 startup for an uncertain gain, and the scheduler needs its beans anyway.
 
----
+Since a push costs ~2.5 minutes of downtime, batch documentation-only changes in
+with the next real one rather than deploying them alone.
 
 ## 3b. `/flights` sends more than the map uses
 
