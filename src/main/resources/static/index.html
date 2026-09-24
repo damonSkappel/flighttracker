@@ -168,6 +168,9 @@
     // the screen are attached to the map, so the DOM holds the couple of hundred
     // markers you can actually see rather than every aircraft in the country.
     const flightLayer = L.layerGroup().addTo(map);
+    // Holds the selected aircraft's trail. Polylines draw in the overlay pane,
+    // beneath the marker pane, so the trail never covers an icon.
+    const trailLayer = L.layerGroup().addTo(map);
 
     // Fraction of the viewport kept attached beyond the visible edges, so a small
     // pan does not pop markers in at the border.
@@ -211,6 +214,20 @@
     const FETCH_INTERVAL_MS = 30000;
     // Below this ground speed treat the aircraft as parked.
     const MIN_ANIMATE_SPEED_MPS = 5;
+
+    // ─── Trail tuning ──────────────────────────────────────────────────────────
+
+    // The server clamps history to 500 rows. Retention is 6h at a 2-minute poll,
+    // about 180 rows, so asking for the maximum gets the whole retained track.
+    const TRAIL_HISTORY_LIMIT = 500;
+    // Fixes further apart than this are not joined. Retention can hold an earlier
+    // leg of the same airframe, and a straight line across the gap -- or across a
+    // stretch outside receiver coverage -- would claim a route it never flew.
+    const TRAIL_GAP_S = 600;
+    const TRAIL_STYLE = { color: '#4fc3f7', weight: 2, opacity: 0.8, interactive: false };
+    // Dashed: from the last reported fix to where the icon is being dead-reckoned.
+    // It is a guess, and should read as one next to the reported track.
+    const LEAD_STYLE = { color: '#4fc3f7', weight: 2, opacity: 0.6, dashArray: '4 6', interactive: false };
 
     // ─── Geo helpers ───────────────────────────────────────────────────────────
     // Pure functions: no map or DOM state. These are what position extrapolation
@@ -480,6 +497,9 @@
                 maxWidth: 220,
                 className: 'flight-popup'
             });
+            const icao24 = flight.icao24;
+            marker.on('popupopen', () => showTrail(icao24));
+            marker.on('popupclose', () => clearTrail(icao24));
             entry = {
                 marker,
                 fix: fix,
@@ -515,6 +535,8 @@
             ? { dLat: latGap, dLon: lonGap, dHeading: headingGap, startMs: nowMs }
             : null;
 
+        if (trail && trail.icao24 === flight.icao24) appendTrailFix(fix, entry.shown);
+
         if (entry.marker.getPopup()) {
             // setPopupContent rather than rebind: rebinding closes a popup the
             // user currently has open.
@@ -540,7 +562,7 @@
     function renderTracks(nowMs) {
         const bounds = map.getBounds().pad(VIEWPORT_PAD);
 
-        for (const entry of tracks.values()) {
+        for (const [icao24, entry] of tracks) {
             const fix = entry.fix;
             const target = extrapolate(fix, nowMs);
 
@@ -587,6 +609,7 @@
                 entry.marker.setLatLng([lat, lon]);
                 shown.lat = lat;
                 shown.lon = lon;
+                if (trail && trail.icao24 === icao24) updateTrailLead(lat, lon);
             }
 
             // A change of ground state changes the icon's colour and size, so it
@@ -615,9 +638,108 @@
         }
     }
 
+    // ─── Flight Trail ───────────────────────────────────────────────────────────
+
+    /**
+     * The one trail on screen, belonging to the aircraft whose popup is open:
+     * {
+     *   icao24,
+     *   segments,   arrays of [lat, lon], split wherever fixes are TRAIL_GAP_S apart
+     *   lastEpoch,  epoch seconds of the newest point, so a repeated fix is not re-added
+     *   line,       solid L.polyline over the reported positions
+     *   lead        dashed L.polyline from the newest fix to the moving icon
+     * }
+     * line and lead are null while the history request is in flight.
+     */
+    let trail = null;
+
+    /** Epoch seconds of a history row: the aircraft's own report, else ingest time. */
+    function historyEpochSeconds(row) {
+        if (row.timePosition != null) return row.timePosition;
+        const parsed = Date.parse(row.timestamp);
+        return Number.isNaN(parsed) ? null : parsed / 1000;
+    }
+
+    /**
+     * Adds one point to the open trail. OpenSky repeats an aircraft's last fix
+     * across polls while no new report arrives, so anything not newer than the
+     * trail's end is dropped rather than stacked.
+     */
+    function addTrailPoint(lat, lon, epoch) {
+        if (lat == null || lon == null || epoch == null) return false;
+        if (trail.lastEpoch != null && epoch <= trail.lastEpoch) return false;
+
+        const startNew = trail.segments.length === 0
+            || epoch - trail.lastEpoch > TRAIL_GAP_S;
+        if (startNew) trail.segments.push([]);
+        trail.segments[trail.segments.length - 1].push([lat, lon]);
+        trail.lastEpoch = epoch;
+        return true;
+    }
+
+    /** A fresh fix from the regular fetch extends the open trail without refetching. */
+    function appendTrailFix(fix, shown) {
+        if (!trail.line) return; // history still loading; it will include this fix
+        if (addTrailPoint(fix.lat, fix.lon, fix.epochSeconds)) {
+            trail.line.setLatLngs(trail.segments);
+            // The lead now starts from this fix. A coasting icon would redraw it
+            // on the next frame anyway, but a parked one never moves to trigger it.
+            updateTrailLead(shown.lat, shown.lon);
+        }
+    }
+
+    function updateTrailLead(lat, lon) {
+        if (!trail.lead || trail.segments.length === 0) return;
+        const last = trail.segments[trail.segments.length - 1];
+        trail.lead.setLatLngs([last[last.length - 1], [lat, lon]]);
+    }
+
+    async function showTrail(icao24) {
+        clearTrail();
+        const pending = { icao24, segments: [], lastEpoch: null, line: null, lead: null };
+        trail = pending;
+
+        let history;
+        try {
+            const response = await fetch(
+                `/flights/${encodeURIComponent(icao24)}/history?limit=${TRAIL_HISTORY_LIMIT}`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            history = await response.json();
+        } catch (error) {
+            console.error('Failed to fetch trail for ' + icao24 + ':', error);
+            return;
+        }
+        // The popup was closed, or another opened, while the request was out.
+        if (trail !== pending) return;
+
+        // The API returns newest first; a line is drawn oldest to newest.
+        for (let i = history.length - 1; i >= 0; i--) {
+            const row = history[i];
+            addTrailPoint(row.latitude, row.longitude, historyEpochSeconds(row));
+        }
+        // The regular fetch may have delivered a newer fix than the history had.
+        const entry = tracks.get(icao24);
+        if (entry) addTrailPoint(entry.fix.lat, entry.fix.lon, entry.fix.epochSeconds);
+
+        pending.line = L.polyline(pending.segments, TRAIL_STYLE).addTo(trailLayer);
+        pending.lead = L.polyline([], LEAD_STYLE).addTo(trailLayer);
+        if (entry) updateTrailLead(entry.shown.lat, entry.shown.lon);
+    }
+
+    /**
+     * Removes the trail. Given an icao24, only when it is that aircraft's trail:
+     * Leaflet fires the old popup's close around the new one's open, and the
+     * close must not take down the trail that has just been started.
+     */
+    function clearTrail(icao24) {
+        if (!trail || (icao24 && trail.icao24 !== icao24)) return;
+        trailLayer.clearLayers();
+        trail = null;
+    }
+
     // ─── Animation Loop ─────────────────────────────────────────────────────────
 
-    // Independent of the fetch cycle: the server is polled every 15s, but the map
+    // Independent of the fetch cycle: the server is fetched every 30s, but the map
     // redraws continuously so aircraft coast between fixes rather than hopping.
     // requestAnimationFrame pauses itself in a background tab, and because every
     // position is derived from absolute fix time rather than accumulated deltas,

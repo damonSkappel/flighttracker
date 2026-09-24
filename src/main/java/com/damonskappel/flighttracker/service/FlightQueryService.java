@@ -44,7 +44,7 @@ public class FlightQueryService {
 
     public FlightQueryService(AircraftRepository aircraftRepository,
                               PositionSnapshotRepository snapshotRepository,
-                              @Value("${flighttracker.active-window-minutes:15}")
+                              @Value("${flighttracker.active-window-minutes:6}")
                               int activeWindowMinutes) {
         this.aircraftRepository = aircraftRepository;
         this.snapshotRepository = snapshotRepository;

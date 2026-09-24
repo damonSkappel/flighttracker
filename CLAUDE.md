@@ -29,7 +29,7 @@ verified by running the app.
 
 ```
 OpenSky REST API
-      │  every 5 min (FlightPollingScheduler.poll)
+      │  every 2 min (FlightPollingScheduler.poll)
       ▼
 OpenSkyClient.fetchCurrentStates()        → List<OpenSkyStateVector>
       │  (raw JSON arrays → DTO via OpenSkyStateVector.fromArray)
@@ -46,8 +46,8 @@ FlightIngestionBatchService.processBatch() @Transactional
 FlightController /flights, /flights/{icao24}, /flights/{icao24}/history, /flights/area
 HealthController /stats
       ▲
-      │  fetch('/flights') every 15s
-static/index.html  (Leaflet + markercluster, all inline)
+      │  fetch('/flights') every 30s; /flights/{icao24}/history on popup open
+static/index.html  (Leaflet, all inline)
 ```
 
 ## Where things live
@@ -55,13 +55,15 @@ static/index.html  (Leaflet + markercluster, all inline)
 | Path (under `src/main/java/com/damonskappel/flighttracker/`) | Role |
 |---|---|
 | `FlighttrackerApplication.java` | Entry point. Loads `.env` into system properties before boot (no-op in prod). |
-| `scheduler/FlightPollingScheduler.java` | `poll()` every 5 min; `cleanupOldSnapshots()` hourly, deletes snapshots >24h old. |
+| `scheduler/FlightPollingScheduler.java` | `poll()` every 2 min; `cleanupOldSnapshots()` hourly, deletes snapshots past `retention-hours`, then the airframes that left with no snapshots. |
+| `controller/FlightController.java` | `/flights`, `/flights/{icao24}`, `/flights/{icao24}/history` (limit clamped to 500), `/flights/area`. |
+| `controller/HealthController.java` | `/stats`. Not read by the frontend. |
 | `service/OpenSkyClient.java` | Fetches state vectors. Sends a bearer token when credentials are configured, refreshes once on a 401, logs remaining credits, and reports a 429 distinctly. Returns an empty list on any failure. |
 | `service/OpenSkyTokenManager.java` | OAuth2 client-credentials token, cached and refreshed 60s before expiry. Dormant with no credentials configured. |
 | `service/FlightIngestionService.java` | Dedupes by icao24, chunks, times the run. Holds the `IngestResult` record. |
 | `service/FlightIngestionBatchService.java` | The `@Transactional` write, via `JdbcTemplate` batches rather than JPA — see "Gotchas". **Separate class on purpose.** |
 | `service/FlightQueryService.java` | All read logic + unit conversion (m→ft, m/s→kts) + haversine. |
-| `repository/AircraftRepository.java` | Native `INSERT … ON CONFLICT` upsert. |
+| `repository/AircraftRepository.java` | Native delete of airframes with no retained snapshots. (The upsert lives in `FlightIngestionBatchService`.) |
 | `repository/PositionSnapshotRepository.java` | JPQL queries incl. `findLatestSnapshotPerAircraft`. |
 | `model/Aircraft.java` | PK is `icao24` (6-char hex string, not generated). |
 | `model/PositionSnapshot.java` | Generated Long id, `@ManyToOne(LAZY)` → Aircraft. |
@@ -71,8 +73,7 @@ static/index.html  (Leaflet + markercluster, all inline)
 | `util/UsTailNumber.java` | Derives a US tail number from icao24. The FAA encodes N-numbers directly into the A00001-ADF7C7 block, so this is a pure function — no lookup, no API call. Returns null outside that block; other countries allocate from registries and cannot be derived. |
 
 Frontend is a single file: `src/main/resources/static/index.html` — styles,
-markup and all JS inline. No build step, no npm. Leaflet and markercluster come
-from cdnjs.
+markup and all JS inline. No build step, no npm. Leaflet comes from cdnjs.
 
 ## Data model
 
@@ -95,6 +96,12 @@ Postgres does *not* auto-index FK columns, so the composite
 `idx_snapshot_icao24_timestamp` is declared explicitly on the entity — the
 latest-per-aircraft and history lookups both collapse to table scans without it.
 
+Snapshot retention deletes positions, not airframes, so the hourly cleanup
+follows it with a delete of `aircraft` rows that no snapshot references. Without
+it the table only grows, and `/stats` `totalAircraft` counts every airframe ever
+seen. The delete also requires `last_seen` to be past the cutoff, so an aircraft
+upserted by a concurrent ingest is never removed out from under its snapshot.
+
 **Deploying a new index is not free.** `ddl-auto=update` runs `CREATE INDEX` at
 startup, which locks writes while it builds and can stall the boot long enough
 for Azure's health check to notice. On a large table, create it by hand with
@@ -105,8 +112,9 @@ for Azure's health check to notice. On a large table, create it by hand with
 - `application.properties` — local defaults, DB on `localhost:5433`.
 - `application-prod.properties` — Azure Postgres, Hikari pool capped at 5.
 - `.env` (gitignored, untracked) — local `DB_*` values.
-- `flighttracker.active-window-minutes` (default 15) — how long an aircraft
-  stays "active" after its last snapshot.
+- `flighttracker.active-window-minutes` (6 in both properties files, same as the
+  code fallback) — how long an aircraft stays "active" after its last snapshot.
+  Three 2-minute poll cycles.
 - `OPENSKY_CLIENT_ID` / `OPENSKY_CLIENT_SECRET` — OAuth2 client credentials from
   https://opensky-network.org/my-opensky/account. Blank means anonymous tier.
   `opensky.states-url` and `opensky.credits-per-call` are overridable together if
@@ -161,15 +169,17 @@ records why the OpenSky fetch cost deliberately does *not* scale with viewers.
    minutes that is 72% of an authenticated budget, so there is not much room
    left.
 
-   **Four values move together** when the interval changes: `fixedDelay`,
-   `flighttracker.active-window-minutes` (≈3 cycles), and `MAX_EXTRAPOLATION_S`
-   (≈1 cycle) / `STALE_FADE_S` in index.html. Changing one alone produces a map
+   **Five values move together** when the interval changes: `fixedDelay`,
+   `flighttracker.active-window-minutes` (≈3 cycles), and in index.html
+   `FETCH_INTERVAL_MS`, `MAX_EXTRAPOLATION_S` (OpenSky lag + poll + fetch
+   interval) and `STALE_FADE_S` (≈1 cycle). Changing one alone produces a map
    that either blanks between polls or dims aircraft that are actually fresh.
 3. **`flighttracker.active-window-minutes` must stay well above the poll
    interval.** They answer different questions and were once both 5 minutes,
    which meant every aircraft expired before its replacement landed and
-   `/flights` returned an empty list between polls. 15 minutes gives three
-   cycles of slack so two failed polls still leave a populated map.
+   `/flights` returned an empty list between polls. 6 minutes against a
+   2-minute poll gives three cycles of slack, so two failed polls still leave a
+   populated map.
 4. **Latest-per-aircraft queries carry two load-bearing details.** `JOIN FETCH
    p.aircraft` (without it, reading the callsign fires one SELECT per row — an
    N+1 of thousands per request) and the repeated `p2.timestamp > :cutoff`
@@ -216,8 +226,8 @@ inside a cluster group corrupts it, which rules it out for dead reckoning.
 
 ## Dead reckoning
 
-Implemented. Aircraft coast along their heading between polls instead of hopping
-every 15 seconds.
+Implemented. Aircraft coast along their heading between fixes instead of hopping
+on every fetch.
 
 **How a position is produced.** For each visible track, every frame:
 
@@ -265,10 +275,34 @@ when the value has not changed.
 
 **Tuning** is the constants block near the top of the script:
 `MAX_EXTRAPOLATION_S`, `STALE_FADE_S`, `STALE_MIN_OPACITY`, `SNAP_MS`,
-`RENDER_INTERVAL_MS`, `MIN_ANIMATE_SPEED_MPS`. `MAX_EXTRAPOLATION_S` is set to
-roughly one poll interval: long enough to keep motion continuous between polls,
-short enough that an unseen turn cannot throw an icon absurdly far.
+`RENDER_INTERVAL_MS`, `MIN_ANIMATE_SPEED_MPS`. `MAX_EXTRAPOLATION_S` (180) is the
+oldest fix the browser can legitimately hold: OpenSky lag (~20s) + server poll
+(120s) + fetch interval (30s). Lower and aircraft freeze before their replacement
+arrives; higher and an unseen turn throws the icon further than it needs to.
 
-**Known limitation.** The 5-minute poll makes this inherently approximate — a
-turn is invisible until the next fix. Shortening the poll needs OpenSky
-authentication first (see Gotchas).
+**Known limitation.** The 2-minute poll makes this inherently approximate — a
+turn is invisible until the next fix. The poll is already authenticated, so
+shortening it further is limited by the credit budget (see Gotchas).
+
+## Flight trail
+
+Opening a popup fetches `/flights/{icao24}/history` and draws the retained track
+in `trailLayer`: solid for reported positions, and a dashed lead from the newest
+fix to the dead-reckoned icon, so the guessed part reads as a guess. Only one
+trail exists at a time, and closing the popup removes it. That includes the
+marker being culled or pruned, because Leaflet closes a popup when its marker
+leaves the map.
+
+- **Fixes repeat.** OpenSky resends an aircraft's last fix while no new report
+  arrives, so points are only added when their `timePosition` is newer than the
+  trail's end.
+- **Gaps are not joined.** Consecutive fixes more than `TRAIL_GAP_S` apart start
+  a new segment. Retention can hold an earlier leg of the same airframe, and
+  joining the two would draw a route it never flew.
+- **New fixes extend the trail without a refetch.** `upsertTrack` appends each
+  fresh fix for the selected aircraft.
+- **Stale responses are dropped.** `showTrail` discards its response if the
+  popup closed, or another opened, while the request was out.
+- `clearTrail(icao24)` only clears that aircraft's trail. Leaflet fires the old
+  popup's close around the new one's open, and the close must not remove the new
+  trail.

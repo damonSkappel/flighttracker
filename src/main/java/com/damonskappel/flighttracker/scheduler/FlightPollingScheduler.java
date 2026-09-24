@@ -1,6 +1,7 @@
 package com.damonskappel.flighttracker.scheduler;
 
 import com.damonskappel.flighttracker.dto.OpenSkyStateVector;
+import com.damonskappel.flighttracker.repository.AircraftRepository;
 import com.damonskappel.flighttracker.repository.PositionSnapshotRepository;
 import com.damonskappel.flighttracker.service.FlightIngestionService;
 import com.damonskappel.flighttracker.service.OpenSkyClient;
@@ -22,21 +23,25 @@ public class FlightPollingScheduler {
     private final OpenSkyClient openSkyClient;
     private final FlightIngestionService flightIngestionService;
     private final PositionSnapshotRepository snapshotRepository;
+    private final AircraftRepository aircraftRepository;
 
     /**
      * How much snapshot history to keep. Shorter retention keeps the table small,
      * which is what makes the per-aircraft "latest snapshot" lookup cheap. At a
-     * 5-minute poll this is still 12 history points per aircraft per hour.
+     * 2-minute poll this is still 30 history points per aircraft per hour, which
+     * is what the map draws as the trail behind a selected aircraft.
      */
     private final int retentionHours;
 
     public FlightPollingScheduler(OpenSkyClient openSkyClient,
                                   FlightIngestionService flightIngestionService,
                                   PositionSnapshotRepository snapshotRepository,
+                                  AircraftRepository aircraftRepository,
                                   @Value("${flighttracker.retention-hours:6}") int retentionHours) {
         this.openSkyClient = openSkyClient;
         this.flightIngestionService = flightIngestionService;
         this.snapshotRepository = snapshotRepository;
+        this.aircraftRepository = aircraftRepository;
         this.retentionHours = retentionHours;
     }
 
@@ -65,5 +70,11 @@ public class FlightPollingScheduler {
         Instant cutoff = Instant.now().minus(retentionHours, ChronoUnit.HOURS);
         int deleted = snapshotRepository.deleteSnapshotsOlderThan(cutoff);
         log.info("Snapshot cleanup removed {} rows older than {}h", deleted, retentionHours);
+
+        // Must run after the snapshot delete: it is what leaves these airframes
+        // with nothing referencing them. Safe to share a thread with poll(),
+        // since the default scheduler is single-threaded and the two never overlap.
+        int prunedAircraft = aircraftRepository.deleteAircraftWithoutSnapshots(cutoff);
+        log.info("Aircraft cleanup removed {} airframes with no retained snapshots", prunedAircraft);
     }
 }
