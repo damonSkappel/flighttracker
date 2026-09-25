@@ -21,8 +21,9 @@ stub that needs a live database. Two real ones need no database:
 bearer token, refresh-and-retry on a 401, token caching and the anonymous
 fallback. `IngestBatchingCheck` counts JDBC round trips and asserts the UTC
 timestamp binding, the icao24 dedupe and that malformed rows are dropped rather
-than failing a whole batch. Run both with
-`./mvnw test -Dtest='OpenSkyAuthCheck,IngestBatchingCheck'`. Everything else is
+than failing a whole batch. `AircraftTypeCsvCheck` covers the aircraft database
+parser's quoting rules. Run all three with
+`./mvnw test -Dtest='OpenSkyAuthCheck,IngestBatchingCheck,AircraftTypeCsvCheck'`. Everything else is
 verified by running the app.
 
 ## Request path in one picture
@@ -43,10 +44,11 @@ FlightIngestionBatchService.processBatch() @Transactional
       ▲
       │  FlightQueryService (@Transactional readOnly)
       │
-FlightController /flights, /flights/{icao24}, /flights/{icao24}/history, /flights/area
+FlightController /flights, /flights/{icao24}, /flights/{icao24}/history,
+                 /flights/{icao24}/type, /flights/area
 HealthController /stats
       ▲
-      │  fetch('/flights') every 30s; /flights/{icao24}/history on popup open
+      │  fetch('/flights') every 30s; /history and /type on popup open
 static/index.html  (Leaflet, all inline)
 ```
 
@@ -56,12 +58,14 @@ static/index.html  (Leaflet, all inline)
 |---|---|
 | `FlighttrackerApplication.java` | Entry point. Loads `.env` into system properties before boot (no-op in prod). |
 | `scheduler/FlightPollingScheduler.java` | `poll()` every 2 min; `cleanupOldSnapshots()` hourly, deletes snapshots past `retention-hours`, then the airframes that left with no snapshots. |
-| `controller/FlightController.java` | `/flights`, `/flights/{icao24}`, `/flights/{icao24}/history` (limit clamped to 500), `/flights/area`. |
+| `controller/FlightController.java` | `/flights`, `/flights/{icao24}`, `/flights/{icao24}/history` (limit clamped to 500), `/flights/{icao24}/type` (404 when unknown), `/flights/area`. |
 | `controller/HealthController.java` | `/stats`. Not read by the frontend. |
 | `service/OpenSkyClient.java` | Fetches state vectors. Sends a bearer token when credentials are configured, refreshes once on a 401, logs remaining credits, and reports a 429 distinctly. Returns an empty list on any failure. |
 | `service/OpenSkyTokenManager.java` | OAuth2 client-credentials token, cached and refreshed 60s before expiry. Dormant with no credentials configured. |
 | `service/FlightIngestionService.java` | Dedupes by icao24, chunks, times the run. Holds the `IngestResult` record. |
 | `service/FlightIngestionBatchService.java` | The `@Transactional` write, via `JdbcTemplate` batches rather than JPA — see "Gotchas". **Separate class on purpose.** |
+| `service/AircraftTypeImporter.java` | Loads the OpenSky aircraft database into `aircraft_type` on its own thread. See "Aircraft type". |
+| `service/AircraftTypeCsvReader.java` | Streaming parser for that database's non-standard CSV. |
 | `service/FlightQueryService.java` | All read logic + unit conversion (m→ft, m/s→kts) + haversine. |
 | `repository/AircraftRepository.java` | Native delete of airframes with no retained snapshots. (The upsert lives in `FlightIngestionBatchService`.) |
 | `repository/PositionSnapshotRepository.java` | JPQL queries incl. `findLatestSnapshotPerAircraft`. |
@@ -89,6 +93,17 @@ aircraft                          position_snapshots
                                     last_contact
                                     (idx_snapshot_icao24_timestamp)
 ```
+
+```
+aircraft_type                     aircraft_type_import
+  icao24  PK varchar(6)             source_key  PK   <- release already loaded
+  typecode (ICAO, e.g. B738)        row_count, imported_at
+  manufacturer, model
+  registration, operator
+```
+
+`aircraft_type` is reference data with no FK to `aircraft`, and cleanup never
+touches it.
 
 Schema is managed by `spring.jpa.hibernate.ddl-auto=update` — **there are no
 migration files**. Changing an entity changes the prod schema on next deploy.
@@ -125,6 +140,8 @@ for Azure's health check to notice. On a large table, create it by hand with
   so Azure **Always On** must be enabled or both cleanup and polling stop when
   the app idles out. Postgres reclaims the freed space via autovacuum, not
   immediately.
+- `flighttracker.aircraft-types.enabled` (default true),
+  `.check-interval-hours` (6) and `.bucket-url` — the aircraft type import.
 - `.github/workflows/deploy.yml` — on push to `main`: `mvn package -DskipTests`
   then `azure/webapps-deploy@v3` with `package: target/*.jar`.
 
@@ -306,3 +323,27 @@ leaves the map.
 - `clearTrail(icao24)` only clears that aircraft's trail. Leaflet fires the old
   popup's close around the new one's open, and the close must not remove the new
   trail.
+
+## Aircraft type
+
+OpenSky state vectors carry no aircraft type, so the popup's "Type" row comes
+from OpenSky's aircraft database: monthly CSV releases in a public bucket
+(`metadata/aircraft-database-complete-YYYY-MM.csv`, ~108MB, ~580k typed rows).
+
+- **The import runs on its own thread, not `@Scheduled`.** The default scheduler
+  is single-threaded, so a multi-minute download there would stall `poll()`.
+  The map works from the first poll and types appear as batches commit, one
+  transaction per 1,000 rows. Don't move it onto the shared scheduler.
+- **It runs at startup and every 6 hours after**, lists the bucket, and loads the
+  newest release unless `aircraft_type_import` already records it. So a deploy
+  costs one listing request, and an import killed by a restart just reruns
+  (the upsert makes that safe). Rows from an older release that a newer one
+  drops are not deleted.
+- **The CSV is not standard.** `'` is the quote, only some fields are quoted,
+  quotes double inside them, and owner lists put newlines inside quoted fields,
+  so a record is not a line. Hence the hand-written `AircraftTypeCsvReader`.
+- **Naming.** `typecode` is the ICAO designator (`B738`), and the row's own
+  `model` is often blank or a sub-variant (`737-8H4`). `TYPE_NAMES` in
+  index.html maps common designators to readable names; anything else falls back
+  to manufacturer + model, then the bare designator. A 404 from `/type` is not
+  cached by the browser, since it can mean the database is still loading.

@@ -1,11 +1,13 @@
 package com.damonskappel.flighttracker.service;
 
+import com.damonskappel.flighttracker.dto.AircraftTypeResponse;
 import com.damonskappel.flighttracker.dto.FlightHistoryResponse;
 import com.damonskappel.flighttracker.dto.FlightResponse;
 import com.damonskappel.flighttracker.dto.StatsResponse;
 import com.damonskappel.flighttracker.model.Aircraft;
 import com.damonskappel.flighttracker.model.PositionSnapshot;
 import com.damonskappel.flighttracker.repository.AircraftRepository;
+import com.damonskappel.flighttracker.repository.AircraftTypeRepository;
 import com.damonskappel.flighttracker.repository.PositionSnapshotRepository;
 import com.damonskappel.flighttracker.util.UsTailNumber;
 import org.springframework.beans.factory.annotation.Value;
@@ -33,6 +35,7 @@ public class FlightQueryService {
 
     private final AircraftRepository aircraftRepository;
     private final PositionSnapshotRepository snapshotRepository;
+    private final AircraftTypeRepository aircraftTypeRepository;
 
     /**
      * How long an aircraft stays "active" after its last snapshot. Must stay
@@ -44,10 +47,12 @@ public class FlightQueryService {
 
     public FlightQueryService(AircraftRepository aircraftRepository,
                               PositionSnapshotRepository snapshotRepository,
+                              AircraftTypeRepository aircraftTypeRepository,
                               @Value("${flighttracker.active-window-minutes:6}")
                               int activeWindowMinutes) {
         this.aircraftRepository = aircraftRepository;
         this.snapshotRepository = snapshotRepository;
+        this.aircraftTypeRepository = aircraftTypeRepository;
         this.activeWindowMinutes = activeWindowMinutes;
     }
 
@@ -72,6 +77,14 @@ public class FlightQueryService {
         // Known airframe that has no snapshot left in retention.
         return aircraftRepository.findById(icao24)
                 .map(aircraft -> toFlightResponse(aircraft, null));
+    }
+
+    // GET /flights/{icao24}/type — what the airframe is, from the OpenSky aircraft database
+    @Transactional(readOnly = true)
+    public Optional<AircraftTypeResponse> getAircraftType(String icao24) {
+        return aircraftTypeRepository.findById(icao24)
+                .map(t -> new AircraftTypeResponse(t.getIcao24(), t.getTypecode(),
+                        t.getManufacturer(), t.getModel(), t.getRegistration(), t.getOperator()));
     }
 
     // GET /flights/{icao24}/history — position history, newest first

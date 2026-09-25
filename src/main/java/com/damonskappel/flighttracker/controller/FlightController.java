@@ -1,5 +1,6 @@
 package com.damonskappel.flighttracker.controller;
 
+import com.damonskappel.flighttracker.dto.AircraftTypeResponse;
 import com.damonskappel.flighttracker.dto.FlightHistoryResponse;
 import com.damonskappel.flighttracker.dto.FlightResponse;
 import com.damonskappel.flighttracker.service.FlightQueryService;
@@ -35,6 +36,17 @@ public class FlightController {
         Optional<FlightResponse> flight =
                 flightQueryService.getFlightByIcao24(icao24.toLowerCase());
         return flight.map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    /**
+     * 404 when the aircraft database has no entry for this address, which also
+     * covers the minutes after a first deploy while the database is still loading.
+     */
+    @GetMapping("/{icao24}/type")
+    public ResponseEntity<AircraftTypeResponse> getAircraftType(@PathVariable String icao24) {
+        return flightQueryService.getAircraftType(icao24.toLowerCase())
+                .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
     }
 

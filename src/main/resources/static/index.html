@@ -115,6 +115,8 @@
         .popup-row .val {
             color: #eee;
             font-weight: 500;
+            text-align: right;
+            margin-left: 8px;
         }
         .aircraft-icon {
             display: flex;
@@ -352,8 +354,108 @@
             .replace(/'/g, '&#39;');
     }
 
+    // ─── Aircraft Type ──────────────────────────────────────────────────────────
+
+    // Readable names for the ICAO designators most often seen over the US. The
+    // aircraft database's own model string is often blank or a sub-variant
+    // ("737-8H4"), so a curated name wins where there is one; anything else falls
+    // back to manufacturer + model, then to the bare designator.
+    const TYPE_NAMES = {
+        A19N: 'Airbus A319neo', A20N: 'Airbus A320neo', A21N: 'Airbus A321neo',
+        A318: 'Airbus A318', A319: 'Airbus A319', A320: 'Airbus A320', A321: 'Airbus A321',
+        A332: 'Airbus A330-200', A333: 'Airbus A330-300', A339: 'Airbus A330-900neo',
+        A343: 'Airbus A340-300', A346: 'Airbus A340-600',
+        A359: 'Airbus A350-900', A35K: 'Airbus A350-1000', A388: 'Airbus A380-800',
+        BCS1: 'Airbus A220-100', BCS3: 'Airbus A220-300',
+        B712: 'Boeing 717', B733: 'Boeing 737-300', B734: 'Boeing 737-400',
+        B735: 'Boeing 737-500', B736: 'Boeing 737-600', B737: 'Boeing 737-700',
+        B738: 'Boeing 737-800', B739: 'Boeing 737-900',
+        B37M: 'Boeing 737 MAX 7', B38M: 'Boeing 737 MAX 8', B39M: 'Boeing 737 MAX 9',
+        B3XM: 'Boeing 737 MAX 10',
+        B744: 'Boeing 747-400', B748: 'Boeing 747-8',
+        B752: 'Boeing 757-200', B753: 'Boeing 757-300',
+        B762: 'Boeing 767-200', B763: 'Boeing 767-300', B764: 'Boeing 767-400',
+        B772: 'Boeing 777-200', B77L: 'Boeing 777-200LR', B773: 'Boeing 777-300',
+        B77W: 'Boeing 777-300ER', B778: 'Boeing 777-8', B779: 'Boeing 777-9',
+        B788: 'Boeing 787-8', B789: 'Boeing 787-9', B78X: 'Boeing 787-10',
+        MD11: 'McDonnell Douglas MD-11', MD88: 'McDonnell Douglas MD-88',
+        MD90: 'McDonnell Douglas MD-90',
+        CRJ2: 'Bombardier CRJ200', CRJ7: 'Bombardier CRJ700',
+        CRJ9: 'Bombardier CRJ900', CRJX: 'Bombardier CRJ1000',
+        E135: 'Embraer ERJ-135', E145: 'Embraer ERJ-145',
+        E170: 'Embraer E170', E75L: 'Embraer E175', E75S: 'Embraer E175',
+        E190: 'Embraer E190', E195: 'Embraer E195', E290: 'Embraer E190-E2',
+        E295: 'Embraer E195-E2',
+        DH8A: 'Dash 8-100', DH8B: 'Dash 8-200', DH8C: 'Dash 8-300', DH8D: 'Dash 8-400',
+        AT43: 'ATR 42-300', AT45: 'ATR 42-500', AT72: 'ATR 72', AT75: 'ATR 72-500',
+        AT76: 'ATR 72-600',
+        C172: 'Cessna 172 Skyhawk', C182: 'Cessna 182 Skylane', C208: 'Cessna 208 Caravan',
+        C25A: 'Cessna Citation CJ2', C25B: 'Cessna Citation CJ3', C56X: 'Cessna Citation Excel',
+        C68A: 'Cessna Citation Latitude', C700: 'Cessna Citation Longitude',
+        BE20: 'Beechcraft King Air 200', B350: 'Beechcraft King Air 350',
+        PC12: 'Pilatus PC-12', PC24: 'Pilatus PC-24', SR22: 'Cirrus SR22',
+        CL30: 'Bombardier Challenger 300', CL35: 'Bombardier Challenger 350',
+        CL60: 'Bombardier Challenger 600', GL5T: 'Bombardier Global 5000',
+        GLEX: 'Bombardier Global Express', GL7T: 'Bombardier Global 7500',
+        GLF4: 'Gulfstream IV', GLF5: 'Gulfstream V', GLF6: 'Gulfstream G650',
+        E55P: 'Embraer Phenom 300', E50P: 'Embraer Phenom 100',
+        C130: 'Lockheed C-130 Hercules', C17: 'Boeing C-17 Globemaster III',
+        K35R: 'Boeing KC-135 Stratotanker'
+    };
+
+    /**
+     * icao24 -> the /flights/{icao24}/type response. Only hits are cached: a 404
+     * can mean the aircraft database is still loading, so it is asked again the
+     * next time that popup opens.
+     */
+    const aircraftTypes = new Map();
+
+    function typeName(info) {
+        if (!info) return null;
+        if (info.typecode && TYPE_NAMES[info.typecode]) return TYPE_NAMES[info.typecode];
+        if (info.model) {
+            // Models often already lead with the maker ("Airbus A380 861").
+            const maker = info.manufacturer;
+            return maker && !info.model.toLowerCase().startsWith(maker.toLowerCase())
+                ? maker + ' ' + info.model
+                : info.model;
+        }
+        return info.typecode;
+    }
+
+    async function showType(icao24) {
+        if (aircraftTypes.has(icao24)) return;
+        let info;
+        try {
+            const response = await fetch(`/flights/${encodeURIComponent(icao24)}/type`);
+            if (response.status === 404) return;
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            info = await response.json();
+        } catch (error) {
+            console.error('Failed to fetch type for ' + icao24 + ':', error);
+            return;
+        }
+        aircraftTypes.set(icao24, info);
+        const entry = tracks.get(icao24);
+        if (entry && entry.marker.isPopupOpen()) {
+            entry.marker.setPopupContent(buildPopup(entry.flight));
+        }
+    }
+
     function buildPopup(flight) {
         const callsign = esc(flight.callsign || flight.icao24 || 'Unknown');
+        const type = aircraftTypes.get(flight.icao24);
+        const name = typeName(type);
+        const typeText = !name ? '—'
+            : type.typecode && type.typecode !== name
+                ? `${esc(name)} <span class="label">${esc(type.typecode)}</span>`
+                : esc(name);
+        const registration = flight.registration || (type && type.registration);
+        const operatorRow = type && type.operator ? `
+                <div class="popup-row">
+                    <span class="label">Operator</span>
+                    <span class="val">${esc(type.operator)}</span>
+                </div>` : '';
         const altitude = flight.altitudeFeet != null
             ? Math.round(flight.altitudeFeet).toLocaleString() + ' ft'
             : '—';
@@ -377,12 +479,16 @@
             <div class="popup-content">
                 <div class="popup-callsign">${callsign}</div>
                 <div class="popup-row">
+                    <span class="label">Type</span>
+                    <span class="val">${typeText}</span>
+                </div>${operatorRow}
+                <div class="popup-row">
                     <span class="label">ICAO24</span>
                     <span class="val">${esc(flight.icao24)}</span>
                 </div>
                 <div class="popup-row">
                     <span class="label">Tail #</span>
-                    <span class="val">${esc(flight.registration) || '—'}</span>
+                    <span class="val">${esc(registration) || '—'}</span>
                 </div>
                 <div class="popup-row">
                     <span class="label">Country</span>
@@ -422,6 +528,8 @@
      * icao24 -> {
      *   marker,   L.Marker, reused across polls so it can be moved rather than
      *             rebuilt -- this persistence is what animation requires
+     *   flight,   the latest /flights row, kept to rebuild the popup when its
+     *             aircraft type arrives
      *   fix,      last known truth from the server: position, course, speed and
      *             the epoch that position was reported at
      *   blend,    decaying correction applied while easing onto a new fix
@@ -498,10 +606,14 @@
                 className: 'flight-popup'
             });
             const icao24 = flight.icao24;
-            marker.on('popupopen', () => showTrail(icao24));
+            marker.on('popupopen', () => {
+                showTrail(icao24);
+                showType(icao24);
+            });
             marker.on('popupclose', () => clearTrail(icao24));
             entry = {
                 marker,
+                flight,
                 fix: fix,
                 blend: null,
                 // Matches what the marker was just built with, so the first
@@ -522,6 +634,7 @@
         const guessed = extrapolate(entry.fix, nowMs);
         const previousHeading = entry.fix.heading;
         entry.fix = fix;
+        entry.flight = flight;
         const truth = extrapolate(fix, nowMs);
 
         let headingGap = 0;
