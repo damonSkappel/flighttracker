@@ -22,8 +22,9 @@ bearer token, refresh-and-retry on a 401, token caching and the anonymous
 fallback. `IngestBatchingCheck` counts JDBC round trips and asserts the UTC
 timestamp binding, the icao24 dedupe and that malformed rows are dropped rather
 than failing a whole batch. `AircraftTypeCsvCheck` covers the aircraft database
-parser's quoting rules. Run all three with
-`./mvnw test -Dtest='OpenSkyAuthCheck,IngestBatchingCheck,AircraftTypeCsvCheck'`. Everything else is
+parser's quoting rules, and `UsTailNumberCheck` decodes real FAA address and
+registration pairs. Run all four with
+`./mvnw test -Dtest='OpenSkyAuthCheck,IngestBatchingCheck,AircraftTypeCsvCheck,UsTailNumberCheck'`. Everything else is
 verified by running the app.
 
 ## Request path in one picture

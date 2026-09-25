@@ -78,17 +78,28 @@ public final class UsTailNumber {
         remainder -= LETTER_ENDINGS;
         out.append(remainder / BUCKET_4);
         remainder %= BUCKET_4;
-        if (remainder < 25) return out.append(ending(remainder)).toString();
+        // Only one character fits after four digits, so no letter pairs here.
+        if (remainder < 25) return out.append(singleLetter(remainder)).toString();
 
         // Past the letter endings, what is left is the fifth and final digit.
         return out.append(remainder - 25).toString();
     }
 
-    /** 0 is no ending, 1-24 a single letter, 25-600 a letter pair. */
+    /**
+     * 0 is no ending; after that each letter owns 25 slots, the letter alone and
+     * then its 24 pairs, because the FAA orders N1A, N1AA, N1AB ... N1AZ, N1B.
+     * Treating all single letters as coming before all pairs decodes N1AA as N1B.
+     */
     private static String ending(int n) {
         if (n == 0) return "";
-        if (n <= 24) return String.valueOf(ALPHABET.charAt(n - 1));
-        int pair = n - 25;
-        return "" + ALPHABET.charAt(pair / 24) + ALPHABET.charAt(pair % 24);
+        int first = (n - 1) / 25;
+        int second = (n - 1) % 25;
+        if (second == 0) return String.valueOf(ALPHABET.charAt(first));
+        return "" + ALPHABET.charAt(first) + ALPHABET.charAt(second - 1);
+    }
+
+    /** 0 is no ending, 1-24 a single letter. */
+    private static String singleLetter(int n) {
+        return n == 0 ? "" : String.valueOf(ALPHABET.charAt(n - 1));
     }
 }
